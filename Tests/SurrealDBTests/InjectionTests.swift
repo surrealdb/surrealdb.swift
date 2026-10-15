@@ -74,3 +74,36 @@ func injection_recordIDRenderingEscapes() {
     #expect(SurrealRecordID(table: "person", id: .string("a`; DELETE x")).rawValue == #"person:`a\`; DELETE x`"#)
     #expect(SurrealRecordID(table: "my table", id: .int(1)).rawValue == "`my table`:1")
 }
+
+@Test
+func injection_combiningRenamesClashingBindings() {
+    // Two hand-written predicates reusing `$value` with different values used
+    // to send the left value for both.
+    let x = SurrealPredicate(raw: "x = $value", bindings: ["value": .int(1)])
+    let y = SurrealPredicate(raw: "y = $value OR z = $values", bindings: ["value": .int(2), "values": .int(3)])
+    let both = x && y
+    #expect(both.bindings["value"] == .int(1))
+    #expect(both.bindings["values"] == .int(3))
+    let renamed = both.bindings.first { $0.value == .int(2) }?.key
+    #expect(renamed != nil && renamed != "value")
+    #expect(both.raw == "(x = $value AND y = $\(renamed ?? "") OR z = $values)")
+
+    // The same name bound to the same value is shared, not renamed.
+    let same = x || SurrealPredicate(raw: "w = $value", bindings: ["value": .int(1)])
+    #expect(same.raw == "(x = $value OR w = $value)")
+    #expect(same.bindings == ["value": .int(1)])
+}
+
+@Test
+func injection_typedPredicateValuesAreCast() {
+    // The JSON wire format sends these as strings, so the comparison casts
+    // them back; over CBOR the cast is a no-op.
+    let date = SurrealField<PlainModel, Date>("at") == Date(timeIntervalSince1970: 0)
+    #expect(date.raw.hasPrefix("`at` = <datetime>$_pv"))
+    let id = SurrealField<PlainModel, SurrealRecordID>("owner") == SurrealRecordID(table: "person", id: .int(1))
+    #expect(id.raw.hasPrefix("`owner` = <record>$_pv"))
+    let uuid = SurrealField<PlainModel, UUID>("ref") == UUID()
+    #expect(uuid.raw.hasPrefix("`ref` = <uuid>$_pv"))
+    let plain = SurrealField<PlainModel, String>("name") == "x"
+    #expect(plain.raw.hasPrefix("`name` = $_pv"))
+}
