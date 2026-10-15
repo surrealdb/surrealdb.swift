@@ -135,7 +135,20 @@ enum CBORSurrealCodec {
         case .decimal(let value):
             return .tagged(tagStringDecimal, .utf8String(value))
         case .duration(let value):
-            return .tagged(tagStringDuration, .utf8String(value))
+            // The server's own form: [seconds, nanoseconds], trailing zeros
+            // dropped. Text that doesn't parse goes as a string, so the
+            // server reports it rather than us guessing.
+            guard let (seconds, nanos) = SurrealValue.duration(value).durationComponents else {
+                return .tagged(tagStringDuration, .utf8String(value))
+            }
+            switch (seconds, nanos) {
+            case (0, 0):
+                return .tagged(tagCustomDuration, .array([]))
+            case (_, 0):
+                return .tagged(tagCustomDuration, .array([.unsignedInt(seconds)]))
+            default:
+                return .tagged(tagCustomDuration, .array([.unsignedInt(seconds), .unsignedInt(UInt64(nanos))]))
+            }
         case .table(let value):
             return .tagged(tagTable, .utf8String(value))
         case .recordID(let value):
@@ -286,8 +299,31 @@ enum CBORSurrealCodec {
             return .uuid(UUID(uuidString: stringFromCBOR(value) ?? "") ?? UUID())
         case tagStringDecimal:
             return .decimal(stringFromCBOR(value) ?? "0")
-        case tagStringDuration, tagCustomDuration:
-            return .duration(stringFromCBOR(value) ?? "")
+        case tagStringDuration:
+            guard let text = stringFromCBOR(value) else {
+                throw SurrealError.invalidResponse("Expected a string for a tagged duration (tag 13).")
+            }
+            return .duration(text)
+        case tagCustomDuration:
+            // [seconds?, nanoseconds?]: either may be left out when zero.
+            guard case .array(let parts) = value, parts.count <= 2 else {
+                throw SurrealError.invalidResponse("Expected an array of at most two integers for a duration (tag 14).")
+            }
+            var seconds: UInt64 = 0
+            var nanos: UInt32 = 0
+            if parts.count > 0 {
+                guard let value: UInt64 = exactInteger(parts[0]) else {
+                    throw SurrealError.invalidResponse("Duration seconds must be a non-negative integer.")
+                }
+                seconds = value
+            }
+            if parts.count > 1 {
+                guard let value: UInt32 = exactInteger(parts[1]), value < 1_000_000_000 else {
+                    throw SurrealError.invalidResponse("Duration nanoseconds must be an integer from 0 to 999999999.")
+                }
+                nanos = value
+            }
+            return .duration(seconds: seconds, nanoseconds: nanos)
         case tagCustomDatetime:
             if case .array(let parts) = value, parts.count == 2 {
                 let sec = parts[0].integerValue() ?? 0
@@ -402,6 +438,20 @@ enum CBORSurrealCodec {
             return []
         }
         return values.map(doubleArray3(from:))
+    }
+
+    /// PotentCBOR's `integerValue()` traps when the value doesn't fit `T`.
+    static func exactInteger<T: BinaryInteger>(_ value: CBOR) -> T? {
+        switch value {
+        case .unsignedInt(let uint):
+            return T(exactly: uint)
+        case .negativeInt(let nint):
+            // CBOR stores -1 - n; n == UInt64.max is below Int64.min.
+            guard nint <= UInt64(Int64.max) else { return nil }
+            return T(exactly: -1 - Int64(nint))
+        default:
+            return nil
+        }
     }
 
     private static func stringFromCBOR(_ value: CBOR) -> String? {
