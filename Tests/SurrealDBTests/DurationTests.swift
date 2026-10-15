@@ -15,7 +15,7 @@ func duration_decodesServerSecondsNanosForm() throws {
     #expect(try decode(.tagged(tag, .array([.unsignedInt(1), .unsignedInt(500_000_000)]))) == .duration("1s500ms"))
     #expect(try decode(.tagged(tag, .array([]))) == .duration("0ns"))
     #expect(try decode(.tagged(tag, .array([.unsignedInt(0), .unsignedInt(1)]))) == .duration("1ns"))
-    #expect(try decode(.tagged(tag, .array([.unsignedInt(400 * 86_400)]))) == .duration("1y5w"))
+    #expect(try decode(.tagged(tag, .array([.unsignedInt(UInt64(400 * 86_400))]))) == .duration("1y5w"))
 }
 
 @Test
