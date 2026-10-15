@@ -449,7 +449,7 @@ let edges = try await client.insertRelation([Knows(from: adaID, to: graceID, sin
 
 ### Merge and Patch
 
-`merge` changes only the fields you pass. Use a dictionary or a type holding just those fields: a `nil` optional would set its field to `NULL`.
+`merge` changes only the fields you pass. Use a dictionary or a type holding just those fields. A `nil` optional property is left out of the encoded value, so that field keeps its value; to clear a field, pass `SurrealValue.null` for it (`["nickname": SurrealValue.null]`).
 
 ```swift
 let id = SurrealRecordID(table: "person", id: .string("ada"))
