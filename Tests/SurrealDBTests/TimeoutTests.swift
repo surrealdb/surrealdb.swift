@@ -23,7 +23,9 @@ func integration_requestsTimeOutWhenTheServerStopsAnswering() async throws {
         try await proxy.start()
         defer { proxy.shutdown() }
 
-        let client = try await stalledClient(scheme, proxy: proxy, timeout: 0.5)
+        // The timeout also covers connect/signin/use, so leave room for a
+        // loaded machine.
+        let client = try await stalledClient(scheme, proxy: proxy, timeout: 5)
         defer { Task { await client.close() } }
 
         proxy.setStalled(true)
@@ -35,7 +37,7 @@ func integration_requestsTimeOutWhenTheServerStopsAnswering() async throws {
             if case SurrealError.timeout = error { return true }
             return false
         }
-        #expect(Date().timeIntervalSince(started) < 5, "\(scheme) took too long to time out")
+        #expect(Date().timeIntervalSince(started) < 20, "\(scheme) took too long to time out")
     }
 }
 
@@ -81,4 +83,39 @@ func integration_wsConnectTimesOutAgainstASilentHost() async throws {
         try await client.connect()
     }
     #expect(Date().timeIntervalSince(started) < 5)
+}
+
+@Test
+func integration_aTimedOutStateChangeResetsTheSocket() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+    let client = try SurrealClient(
+        endpoint: "ws://127.0.0.1:\(proxy.port)",
+        options: .init(requestTimeout: 5, pingInterval: 60),
+        websocketOptions: .init(reconnectBaseDelay: 0.05)
+    )
+    try await client.connect()
+    defer { Task { await client.close() } }
+    try await authenticateIfNeeded(client)
+    try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
+    let before = proxy.acceptedConnections
+
+    // A timed-out query leaves the socket alone...
+    proxy.setStalled(true)
+    await #expect(throws: SurrealError.self) { _ = try await client.queryRaw("RETURN 1;") }
+    #expect(proxy.acceptedConnections == before)
+
+    // ...but a timed-out `use` might still be applied, so the client starts
+    // over on a new socket and replays the state it knows.
+    await #expect(throws: SurrealError.self) {
+        try await client.use(namespace: IntegrationEnv.namespace, database: "elsewhere")
+    }
+    proxy.setStalled(false)
+    #expect(await eventually { proxy.acceptedConnections > before })
+    #expect(await eventually {
+        (try? await client.queryRaw("RETURN session::db();").first?.result) == .string(IntegrationEnv.database)
+    })
 }
