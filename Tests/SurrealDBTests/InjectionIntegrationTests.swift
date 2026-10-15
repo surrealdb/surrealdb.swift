@@ -46,3 +46,30 @@ func integration_hostileValuesAndIdsCannotInject() async throws {
         #expect(odd.count == 1)
     }
 }
+
+private struct Nick: SurrealModel, Codable, Sendable {
+    static let surrealTable = "nick"
+    let id: String?
+    let nickname: String?
+
+    var key: String? { id.flatMap { $0.split(separator: ":").last.map(String.init) } }
+}
+
+@Test
+func integration_noneAndBytesPredicatesMatchOverEveryCodec() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    for wire in [SurrealWireProtocol.cbor, .json] {
+        let client = try SurrealClient(endpoint: httpEndpoint(), wireProtocol: wire)
+        try await client.connect()
+        defer { Task { await client.close() } }
+        try await authenticateIfNeeded(client)
+        try await client.use(namespace: IntegrationEnv.namespace, database: "t_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))
+        _ = try await client.queryRaw("CREATE nick:absent; CREATE nick:null SET nickname = NULL, blob = <bytes>'x'; CREATE nick:ff SET blob = encoding::base64::decode('/w==');")
+
+        let absent = try await client.select(Nick.self, where: SurrealField<Nick, String?>("nickname") == nil)
+        #expect(Set(absent.compactMap(\.key)) == ["absent", "ff"], "\(wire)")
+        let ff = try await client.select(Nick.self, where: SurrealField<Nick, SurrealValue>("blob") == .bytes(Data([0xff])))
+        #expect(ff.compactMap(\.key) == ["ff"], "\(wire)")
+    }
+}

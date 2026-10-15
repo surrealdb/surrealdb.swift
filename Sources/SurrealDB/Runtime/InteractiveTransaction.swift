@@ -152,7 +152,14 @@ extension SurrealClientCore {
             await Task.detached { try? await transaction.cancel() }.value
             throw error
         }
-        try await transaction.commit()
+        do {
+            try await transaction.commit()
+        } catch {
+            // The commit may never have been sent (this task was cancelled
+            // after `body` returned), so roll back the same way.
+            await Task.detached { try? await transaction.cancel() }.value
+            throw error
+        }
         return result
     }
 }

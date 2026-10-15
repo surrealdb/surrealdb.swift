@@ -267,7 +267,7 @@ actor SurrealClientCore {
     func signin(_ credentials: SignInCredentials, session: SessionID?) async throws -> AuthTokens {
         let context = try sessionContext(for: session)
         let payload = try credentials.payload(using: context)
-        let response = try await rpc("signin", params: [payload], session: session)
+        let response = try await rpc("signin", params: [payload], session: session, anonymous: true)
 
         let tokens = try parseAuthTokens(response)
         setSessionContext(for: session) { $0.accessToken = tokens.access }
@@ -277,15 +277,17 @@ actor SurrealClientCore {
     func signup(_ credentials: SignUpCredentials, session: SessionID?) async throws -> AuthTokens {
         let context = try sessionContext(for: session)
         let payload = try credentials.payload(using: context)
-        let response = try await rpc("signup", params: [payload], session: session)
+        let response = try await rpc("signup", params: [payload], session: session, anonymous: true)
 
         let tokens = try parseAuthTokens(response)
         setSessionContext(for: session) { $0.accessToken = tokens.access }
         return tokens
     }
 
+    // signin, signup and authenticate replace the stored token, so they're
+    // sent without it: over HTTP a stale one gets the request refused.
     func authenticate(_ token: String, session: SessionID?) async throws {
-        _ = try await rpc("authenticate", params: [.string(token)], session: session)
+        _ = try await rpc("authenticate", params: [.string(token)], session: session, anonymous: true)
         setSessionContext(for: session) { $0.accessToken = token }
     }
 
@@ -318,11 +320,21 @@ actor SurrealClientCore {
 
     /// The server's version, without the `surrealdb-` prefix.
     func version() async throws -> String {
-        let response = try await rpc("version", session: nil)
-        guard case .string(let raw) = response else {
-            throw SurrealError.invalidResponse("Expected a version string.")
+        // Sent without the stored token: over HTTP a stale one would get the
+        // request refused before connect() lets the caller re-authenticate.
+        let response = try await rpc("version", session: nil, anonymous: true)
+        switch response {
+        case .string(let raw):
+            return ServerVersion.strip(raw)
+        case .object(let fields):
+            // Newer servers answer { version, build, timestamp }.
+            if case .string(let raw)? = fields["version"] {
+                return ServerVersion.strip(raw)
+            }
+        default:
+            break
         }
-        return ServerVersion.strip(raw)
+        throw SurrealError.invalidResponse("Expected a version string or object.")
     }
 
     /// Checks `GET /health`. Throws if the server isn't healthy.

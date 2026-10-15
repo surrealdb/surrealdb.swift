@@ -142,3 +142,36 @@ func integration_withTransactionCancelsWhenTheTaskIsCancelled() async throws {
     }
     #expect(try await client.select(Account.self).isEmpty)
 }
+
+@Test
+func integration_withTransactionRollsBackWhenCancelledBeforeCommit() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let client = try await integrationClient(wsEndpoint())
+    defer { Task { await client.close() } }
+    _ = try await client.queryRaw("DEFINE TABLE account SCHEMALESS;")
+
+    // `body` finishes normally, but the task is cancelled by then, so the
+    // commit is refused before it's sent.
+    let captured = Captured()
+    let work = Task {
+        try await client.withTransaction { tx in
+            _ = try await tx.create(Account(name: "late", balance: 1))
+            captured.tx = tx
+            withUnsafeCurrentTask { $0?.cancel() }
+        }
+    }
+    await #expect(throws: (any Error).self) {
+        try await work.value
+    }
+
+    let tx = try #require(captured.tx)
+    await #expect(throws: SurrealError.self) {
+        try await tx.commit()
+    }
+    #expect(try await client.select(Account.self).isEmpty)
+}
+
+private final class Captured: @unchecked Sendable {
+    var tx: SurrealInteractiveTransaction?
+}
