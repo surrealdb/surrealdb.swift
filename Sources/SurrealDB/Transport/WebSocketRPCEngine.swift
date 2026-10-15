@@ -24,6 +24,15 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     /// one drop starts one reconnect loop, not two.
     private var generation = 0
 
+    /// Bumped for every connection attempt. An attempt that finishes its
+    /// handshake after a newer one started (an overlapping `connect()`, or
+    /// one that cancelled a reconnect mid-handshake) discards its socket
+    /// instead of replacing the newer one's.
+    private var attempt = 0
+
+    /// The `connect()` in flight, which overlapping calls wait for.
+    private var pendingConnect: Task<Void, Error>?
+
     init(
         endpoint: URL,
         clientOptions: SurrealClientOptions,
@@ -39,10 +48,16 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     func connect() async throws {
+        if let pendingConnect {
+            return try await pendingConnect.value
+        }
         closedByClient = false
         reconnectTask?.cancel()
         reconnectTask = nil
-        try await establishSocket()
+        let connecting = Task { try await self.establishSocket() }
+        pendingConnect = connecting
+        defer { pendingConnect = nil }
+        try await connecting.value
     }
 
     func close() async {
@@ -113,6 +128,8 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     /// failing every request. (A WebSocket-level ping sent before the
     /// handshake finishes can go unanswered forever, so it isn't used here.)
     private func establishSocket() async throws {
+        attempt += 1
+        let thisAttempt = attempt
         tearDownSocket(closeCode: .goingAway)
 
         let socket = urlSession.webSocketTask(with: endpoint, protocols: codec.websocketSubprotocols)
@@ -130,8 +147,8 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             throw SurrealError.connectionLost(cause: error)
         }
 
-        // close() may have run while we waited.
-        guard !closedByClient else {
+        // close() may have run while we waited, or a newer attempt started.
+        guard !closedByClient, thisAttempt == attempt else {
             socket.cancel(with: .normalClosure, reason: nil)
             throw SurrealError.notConnected
         }
