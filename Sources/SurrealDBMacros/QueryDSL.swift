@@ -57,7 +57,12 @@ public struct SurrealPredicate: Sendable, Hashable, ExpressibleByStringLiteral, 
                 merged[name] = value
                 continue
             }
-            let renamed = PredicateBindingNames.next()
+            // The counter can't know about names written by hand, so skip
+            // any already bound or mentioned here.
+            var renamed = PredicateBindingNames.next()
+            while merged[renamed] != nil || self.bindings[renamed] != nil || text.contains("$" + renamed) {
+                renamed = PredicateBindingNames.next()
+            }
             text = SurrealQL.renameParameter(name, to: renamed, in: text)
             merged[renamed] = value
         }
@@ -140,19 +145,34 @@ extension Optional: SurrealPredicateValue where Wrapped: SurrealPredicateValue {
     }
 }
 
+/// Whether `value` can't be bound portably: NONE and bytes anywhere, and
+/// typed values (datetimes, UUIDs, ...) nested in a container.
+private func needsInlining(_ value: SurrealValue, nested: Bool = false) -> Bool {
+    switch value {
+    case .none, .bytes:
+        return true
+    case .datetime, .uuid, .decimal, .duration, .recordID, .table:
+        return nested
+    case .array(let values), .set(let values):
+        return values.contains { needsInlining($0, nested: true) }
+    case .object(let fields):
+        return fields.values.contains { needsInlining($0, nested: true) }
+    default:
+        return false
+    }
+}
+
 private func binaryPredicate<Model, Value: SurrealPredicateValue>(
     _ lhs: SurrealField<Model, Value>,
     _ op: String,
     _ rhs: Value
 ) -> SurrealPredicate {
     let value = rhs.surrealPredicateValue
-    switch value {
-    case .none, .bytes:
-        // JSON can't carry these as bound values (NONE arrives as NULL,
-        // bytes as base64 text that no cast decodes), so write them inline.
+    // JSON can't carry these as bound values (NONE arrives as NULL, bytes as
+    // base64 text that no cast decodes), nor typed values inside arrays and
+    // objects, which arrive as plain strings. Write them inline instead.
+    if needsInlining(value) {
         return .init(raw: "\(SurrealQL.escapeFieldPath(lhs.name)) \(op) \(value.sqlLiteral)")
-    default:
-        break
     }
     let name = PredicateBindingNames.next()
     return .init(

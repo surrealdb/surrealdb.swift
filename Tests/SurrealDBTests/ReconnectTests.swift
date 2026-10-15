@@ -180,3 +180,32 @@ func integration_closeAbandonsAConnectStillInHandshake() async throws {
     try await authenticateIfNeeded(client)
     #expect(try await client.queryRaw("RETURN 1;").first?.result == .int(1))
 }
+
+@Test
+func integration_cancellingConnectAbandonsTheHandshake() async throws {
+    guard IntegrationEnv.canProxy else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+
+    let client = try SurrealClient(
+        endpoint: "ws://127.0.0.1:\(proxy.port)",
+        options: .init(requestTimeout: 60),
+        websocketOptions: .init(reconnectEnabled: false)
+    )
+    defer { Task { await client.close() } }
+    proxy.setStalled(true)
+    let attempt = Task { try await client.connect() }
+    try await Task.sleep(nanoseconds: 300_000_000)
+
+    let started = Date()
+    attempt.cancel()
+    await #expect(throws: (any Error).self) { try await attempt.value }
+    #expect(Date().timeIntervalSince(started) < 10)
+
+    proxy.setStalled(false)
+    try await client.connect()
+    try await authenticateIfNeeded(client)
+    #expect(try await client.queryRaw("RETURN 1;").first?.result == .int(1))
+}
