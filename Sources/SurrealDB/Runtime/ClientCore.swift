@@ -31,6 +31,8 @@ actor SurrealClientCore {
     }
 
     func connect() async throws {
+        // Connected again only once this attempt succeeds.
+        isConnected = false
         try await engine.connect()
 
         // Subscribe before anything else awaits: a reconnect during the
