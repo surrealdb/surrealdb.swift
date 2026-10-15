@@ -493,6 +493,11 @@ enum CBORSurrealCodec {
             try fields.values.forEach(checkDates)
         case .recordID(let id):
             try checkDates(id.id)
+        case .range(let range):
+            for bound in [range.begin, range.end] {
+                if case .included(let value) = bound { try checkDates(value) }
+                if case .excluded(let value) = bound { try checkDates(value) }
+            }
         default:
             break
         }

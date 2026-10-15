@@ -203,6 +203,31 @@ func integration_explicitConnectDuringRecoveryReissuesLiveQueries() async throws
     #expect(await eventually { live.snapshot.map(\.decoded?.text) == ["after"] }, "\(live.snapshot.map { "\($0.action) \($0.decoded?.text ?? "-")" }) finished=\(live.isFinished)")
 }
 
+@Test
+func integration_reissuedLiveQueriesKeepTheirVariables() async throws {
+    guard IntegrationEnv.canProxy else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+    let client = try await integrationClient("ws://127.0.0.1:\(proxy.port)", websocketOptions: .init(reconnectBaseDelay: 0.05))
+    defer { Task { await client.close() } }
+    _ = try await client.queryRaw("DEFINE TABLE note SCHEMALESS;")
+
+    try await client.set("min", value: .int(5))
+    let live = Collected(try await client.live(LiveQuery<Note>(sql: "LIVE SELECT * FROM note WHERE n > $min;")))
+    defer { live.cancel() }
+    // Changing the variable afterwards doesn't change the running query...
+    try await client.set("min", value: .int(100))
+
+    proxy.dropConnections()
+    #expect(await eventually { (try? await client.queryRaw("RETURN 1;").first?.result) == .int(1) })
+
+    // ...nor the re-issued one.
+    _ = try await client.create(Note(id: nil, text: "ten", n: 10))
+    #expect(await eventually { live.snapshot.map(\.decoded?.text) == ["ten"] })
+}
+
 /// A live-capable engine whose `query` calls can be made to fail as if the
 /// connection dropped again.
 private actor FlakyLiveEngine: LiveRPCEngine {
