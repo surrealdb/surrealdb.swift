@@ -187,6 +187,104 @@ public actor SurrealClient: SurrealLiveQueryable {
         try await core.transaction(build, session: nil)
     }
 
+    /// Inserts `values` into `Model`'s table in one statement and returns
+    /// the inserted records.
+    public func insert<Model: SurrealModel & Codable & Sendable>(_ values: [Model]) async throws -> [Model] {
+        try await core.insert(values, relation: false, session: nil)
+    }
+
+    /// Inserts one record into `Model`'s table.
+    public func insert<Model: SurrealModel & Codable & Sendable>(_ value: Model) async throws -> Model? {
+        try await core.insert([value], relation: false, session: nil).first
+    }
+
+    /// Inserts edges into `Edge`'s table, which must be a relation table.
+    /// Each edge needs `in` and `out` record ids.
+    public func insertRelation<Edge: SurrealModel & Codable & Sendable>(_ edges: [Edge]) async throws -> [Edge] {
+        try await core.insert(edges, relation: true, session: nil)
+    }
+
+    /// Merges `data` into a record, leaving fields it doesn't mention alone.
+    /// `data` is usually a dictionary or a type with just the fields to
+    /// change: a `nil` optional would set that field to `NULL`.
+    public func merge<Model: Decodable & Sendable>(
+        recordID: SurrealRecordID,
+        with data: some Encodable & Sendable,
+        as model: Model.Type
+    ) async throws -> Model? {
+        try await core.merge(target: .recordID(recordID), where: nil, data: SurrealValue.fromEncodable(data), as: model, session: nil).first
+    }
+
+    /// Merges `data` into every record of `Model`'s table matching
+    /// `predicate`.
+    public func merge<Model: SurrealModel & Decodable & Sendable>(
+        _ model: Model.Type,
+        with data: some Encodable & Sendable,
+        where predicate: SurrealPredicate
+    ) async throws -> [Model] {
+        try await core.merge(target: .table(Model.surrealTable), where: predicate, data: SurrealValue.fromEncodable(data), as: model, session: nil)
+    }
+
+    /// Merges `data` into every record whose id is in `range`.
+    public func merge<Model: Decodable & Sendable>(
+        range: SurrealRecordRange,
+        with data: some Encodable & Sendable,
+        as model: Model.Type
+    ) async throws -> [Model] {
+        try await core.merge(target: range.surrealValue, where: nil, data: SurrealValue.fromEncodable(data), as: model, session: nil)
+    }
+
+    /// Applies JSON Patch operations to a record. If any operation fails,
+    /// including a `test`, the record is left unchanged and this throws.
+    public func patch<Model: Decodable & Sendable>(
+        recordID: SurrealRecordID,
+        _ operations: [SurrealPatchOperation],
+        as model: Model.Type
+    ) async throws -> Model? {
+        try await core.patch(recordID: recordID, operations: operations, as: model, session: nil)
+    }
+
+    /// Creates an `edge` record from `from` to `to` (`RELATE from->edge->to`)
+    /// and returns it.
+    public func relate<Edge: Decodable & Sendable>(
+        _ from: SurrealRecordID,
+        _ edge: String,
+        _ to: SurrealRecordID,
+        content: SurrealValue? = nil,
+        as type: Edge.Type
+    ) async throws -> Edge? {
+        try await core.relate(from: [from], edge: edge, to: [to], content: content, as: type, session: nil).first
+    }
+
+    /// Creates an `edge` record from every record in `from` to every record
+    /// in `to`.
+    public func relate<Edge: Decodable & Sendable>(
+        _ from: [SurrealRecordID],
+        _ edge: String,
+        _ to: [SurrealRecordID],
+        content: SurrealValue? = nil,
+        as type: Edge.Type
+    ) async throws -> [Edge] {
+        try await core.relate(from: from, edge: edge, to: to, content: content, as: type, session: nil)
+    }
+
+    /// Selects the records whose ids are in `range`.
+    public func select<Model: Decodable & Sendable>(
+        range: SurrealRecordRange,
+        as model: Model.Type
+    ) async throws -> [Model] {
+        try await core.select(range: range, as: model, session: nil)
+    }
+
+    /// Deletes the records whose ids are in `range`, returning them as they
+    /// were.
+    public func delete<Model: Decodable & Sendable>(
+        range: SurrealRecordRange,
+        as model: Model.Type
+    ) async throws -> [Model] {
+        try await core.delete(range: range, as: model, session: nil)
+    }
+
     /// Calls a server-side function by name, such as `fn::greet` or
     /// `string::len`, with `arguments`. `version` picks a version of a
     /// `DEFINE MODEL` function.
