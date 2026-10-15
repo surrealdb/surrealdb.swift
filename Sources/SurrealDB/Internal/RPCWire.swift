@@ -326,8 +326,8 @@ enum CBORSurrealCodec {
                 seconds = value
             }
             if parts.count > 1 {
-                guard let value: UInt32 = exactInteger(parts[1]) else {
-                    throw SurrealError.invalidResponse("Duration nanoseconds must be a non-negative integer.")
+                guard let value: UInt32 = exactInteger(parts[1]), value < 1_000_000_000 else {
+                    throw SurrealError.invalidResponse("Duration nanoseconds must be an integer from 0 to 999999999.")
                 }
                 nanos = value
             }
