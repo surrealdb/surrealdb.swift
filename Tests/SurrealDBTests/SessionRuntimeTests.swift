@@ -25,7 +25,11 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
     func connect() async throws {}
     func close() async {}
 
+    private var reconnectDuring: String?
+
     func failNext(_ method: String) { failingMethods.insert(method) }
+    /// Fires a reconnect while the next `method` request is in flight.
+    func reconnect(during method: String) { reconnectDuring = method }
     func holdResponses(for method: String) { heldMethods.insert(method) }
 
     func releaseResponses(for method: String) {
@@ -41,6 +45,11 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
     func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
         requests.append(.init(method: request.method, session: request.session, params: request.params))
+
+        if reconnectDuring == request.method {
+            reconnectDuring = nil
+            reconnectContinuation?.yield(())
+        }
 
         if heldMethods.contains(request.method) {
             await withCheckedContinuation { continuation in
@@ -176,15 +185,10 @@ func core_forkSessionReplicatesStateOntoNewSession() async throws {
     #expect(lastUse?.session == childID)
     #expect(lastAuthenticate?.session == childID)
 
-    // Variables were copied: they merge into the child's query bindings.
-    _ = try await core.queryRaw("RETURN $marker;", bindings: [:], session: child)
-    let query = await engine.lastRequest("query")
-    #expect(query?.session == childID)
-    if case .object(let bindings)? = query?.params?.last {
-        #expect(bindings["marker"] == .string("inherited"))
-    } else {
-        Issue.record("Expected query bindings object.")
-    }
+    // Variables were copied: the child gets its own server-side `let`.
+    let lastLet = await engine.lastRequest("let")
+    #expect(lastLet?.session == childID)
+    #expect(lastLet?.params == [.string("marker"), .string("inherited")])
 }
 
 @Test
@@ -273,11 +277,13 @@ func core_reconnectReplayRestoresStateWithoutDeadlockingAndGatesCalls() async th
     )
     try await core.connect()
     try await waitUntil { await engine.hasSubscriber() }
+    // connect() applies the initial context: one use and one authenticate.
+    #expect(await engine.methods() == ["use", "authenticate"])
 
     // Park the replay's first RPC so we can observe the gate deterministically.
     await engine.holdResponses(for: "use")
     await engine.fireReconnect()
-    try await waitUntil { await engine.count(of: "use") == 1 }
+    try await waitUntil { await engine.count(of: "use") == 2 }
 
     // A call issued mid-replay must wait behind the replay, not race it.
     let query = Task {
@@ -295,7 +301,7 @@ func core_reconnectReplayRestoresStateWithoutDeadlockingAndGatesCalls() async th
     #expect(rows.count == 1)
 
     let methods = await engine.methods()
-    #expect(methods == ["use", "authenticate", "query"])
+    #expect(methods == ["use", "authenticate", "use", "authenticate", "query"])
 }
 
 @Test
@@ -318,4 +324,15 @@ func core_reconnectReplayReattachesForkedSessions() async throws {
     try await waitUntil { await engine.count(of: "use") == 2 }
     let lastUse = await engine.lastRequest("use")
     #expect(lastUse?.session == id.rawValue.uuidString)
+}
+
+@Test
+func core_reconnectDuringConnectSetupIsReplayed() async throws {
+    let engine = MockSessionEngine()
+    let core = SurrealClientCore(engine: engine, sessionContext: SessionContext(namespace: "ns", database: "db"))
+    // The socket drops and comes back while connect() is still applying the
+    // session; the new socket needs it too.
+    await engine.reconnect(during: "use")
+    try await core.connect()
+    try await waitUntil { await engine.count(of: "use") == 2 }
 }

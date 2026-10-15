@@ -54,6 +54,17 @@ public struct RPCErrorObject: Sendable, Codable {
         self.details = details
         self.cause = cause
     }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        code = try container.decodeIfPresent(Int.self, forKey: .code)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind)
+        message = try container.decode(String.self, forKey: .message)
+        details = try container.decodeIfPresent(SurrealValue.self, forKey: .details)
+        // As over CBOR: a string or null cause mustn't fail the whole error.
+        cause = try container.decodeIfPresent(SurrealValue.self, forKey: .cause)
+            .flatMap(CBORSurrealCodec.decodeRPCCause(from:))
+    }
 }
 
 enum CBORSurrealCodec {
@@ -256,14 +267,23 @@ enum CBORSurrealCodec {
         let kind = object["kind"].flatMap(stringFromSurrealValue(_:))
         let message = object["message"].flatMap(stringFromSurrealValue(_:)) ?? "Unknown RPC error"
         let details = object["details"]
-        let cause = try object["cause"].map(decodeRPCCause(from:))
+        let cause = object["cause"].flatMap(decodeRPCCause(from:))
 
         return RPCErrorObject(code: code, kind: kind, message: message, details: details, cause: cause)
     }
 
-    private static func decodeRPCCause(from value: SurrealValue) throws -> RPCErrorCause {
-        guard case .object(let object) = value else {
-            throw SurrealError.invalidResponse("Expected RPC error cause object.")
+    /// The server sends `cause` as an object, a plain message, or NONE when
+    /// there isn't one. It's extra detail on an error we already have, so
+    /// anything else is dropped rather than failing the response.
+    static func decodeRPCCause(from value: SurrealValue) -> RPCErrorCause? {
+        let object: [String: SurrealValue]
+        switch value {
+        case .object(let value):
+            object = value
+        case .string(let message):
+            return RPCErrorCause(message: message, details: nil, kind: nil, cause: nil)
+        default:
+            return nil
         }
 
         let message = object["message"].flatMap(stringFromSurrealValue(_:)) ?? "Unknown cause"

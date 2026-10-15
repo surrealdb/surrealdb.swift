@@ -253,6 +253,24 @@ let client = try SurrealClient(
 )
 ```
 
+With a token pair from a record access method that has `WITH REFRESH`, `authenticate` refreshes the pair if the access token has expired, and returns the pair to keep:
+
+```swift
+tokens = try await client.authenticate(tokens)
+
+// Or explicitly
+tokens = try await client.refresh(tokens)
+
+// Make the refresh token unusable, for example on sign-out
+try await client.revoke(tokens)
+```
+
+`info()` returns the signed-in record user, and `info(as:)` decodes it:
+
+```swift
+let me = try await client.info(as: User.self)
+```
+
 `SessionContext` here is a static, local snapshot passed at `init` to resume a login — it has no identity on the server. Don't confuse it with `SurrealSession` (below), a live, forkable, server-tracked session identified by a `SessionID`.
 
 ### Invalidating a session
@@ -260,6 +278,17 @@ let client = try SurrealClient(
 ```swift
 try await client.invalidate()
 ```
+
+### Server information
+
+```swift
+let version = try await client.version()  // "3.3.4"
+try await client.health()                 // throws if the server isn't healthy
+```
+
+`health()` calls the server's HTTP `/health` endpoint, whichever transport the client uses.
+
+`connect()` checks the server version and throws `SurrealError.unsupportedServerVersion` for anything outside `ServerVersion.minimum` (3.0.0) up to, but not including, `ServerVersion.maximum` (5.0.0). Set `checkServerVersion: false` in `SurrealClientOptions` to skip the check.
 
 ---
 
@@ -294,7 +323,9 @@ try await session.unset("minAge")
 
 `set`/`unset` are also available on `SurrealClient` itself, scoped to the default session.
 
-Variables are merged into each query's bindings client-side — they are not server-side `LET` parameters. Contexts the server evaluates on its own (for example live-query permission clauses referencing `$minAge`) won't see them. This differs from the JavaScript SDK, whose `set`/`unset` issue server-side RPCs.
+Over WebSocket, `set` and `unset` define and remove the parameter on the server (the `let` and `unset` RPC methods), so anything the server evaluates for that session sees it, and they're defined again after a reconnect. HTTP keeps no session state on the server, so there the variables are sent with each query instead.
+
+`reset()` clears the session: namespace, database, authentication and variables.
 
 ### Closing a session
 
@@ -607,8 +638,9 @@ Applies to both HTTP and WebSocket clients:
 
 ```swift
 SurrealClientOptions(
-    requestTimeout: 20,   // seconds, default 20
-    pingInterval: 30      // seconds, default 30
+    requestTimeout: 20,        // seconds, default 20
+    pingInterval: 30,          // seconds, default 30
+    checkServerVersion: true   // default true
 )
 ```
 

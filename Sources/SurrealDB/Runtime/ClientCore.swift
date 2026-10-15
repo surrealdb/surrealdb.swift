@@ -6,27 +6,56 @@ actor SurrealClientCore {
     private var sessions: [SessionID: SessionContext] = [:]
     private var reconnectReplayTask: Task<Void, Never>?
     private var activeReplay: Task<Void, Never>?
+    private let http: HTTPEndpoints?
+    private let checkServerVersion: Bool
 
-    init(engine: any RPCEngine, sessionContext: SessionContext = .init()) {
+    init(
+        engine: any RPCEngine,
+        sessionContext: SessionContext = .init(),
+        http: HTTPEndpoints? = nil,
+        checkServerVersion: Bool = false
+    ) {
         self.engine = engine
         self.rootSession = sessionContext
+        self.http = http
+        self.checkServerVersion = checkServerVersion
+    }
+
+    /// Whether the server keeps per-session state (namespace, variables) for
+    /// us. Over HTTP every request stands alone, so it's all sent each time.
+    private var serverKeepsState: Bool {
+        engine is any SessionCapableRPCEngine
     }
 
     func connect() async throws {
         try await engine.connect()
 
-        guard let liveEngine = engine as? any LiveRPCEngine else {
+        // Subscribe before anything else awaits: a reconnect during the
+        // version check or session setup below would otherwise be dropped,
+        // leaving the new socket without the session.
+        let reconnects = await (engine as? any LiveRPCEngine)?.reconnectEvents()
+
+        do {
+            if checkServerVersion {
+                try ServerVersion.check(try await version())
+            }
+            if serverKeepsState {
+                // A SessionContext passed at init only exists locally until
+                // it's applied to the new connection.
+                try await apply(session: nil, context: rootSession)
+            }
+        } catch {
+            await engine.close()
+            throw error
+        }
+
+        guard let reconnects else {
             return
         }
 
-        // Subscribe before returning, not inside the task: otherwise a
-        // reconnect that fires between connect() returning and the task
-        // starting is silently dropped.
-        let stream = await liveEngine.reconnectEvents()
-
         reconnectReplayTask?.cancel()
         reconnectReplayTask = Task { [weak self] in
-            for await _ in stream {
+            for await _ in reconnects {
                 guard let self else { return }
                 await self.beginReplay()
             }
@@ -87,7 +116,9 @@ actor SurrealClientCore {
                 if let token = sourceContext.accessToken {
                     try await authenticate(token, session: newID)
                 }
-                sessions[newID]?.variables = sourceContext.variables
+                for (name, value) in sourceContext.variables {
+                    try await set(name, value: value, session: newID)
+                }
             }
         } catch {
             // Roll back the half-created session: detach server-side (the
@@ -175,18 +206,34 @@ actor SurrealClientCore {
     /// skips the local context mutation the public `use`/`authenticate` do —
     /// the stored context already holds exactly the values being replayed.
     private func replay(session: SessionID?, context: SessionContext) async {
+        try? await apply(session: session, context: context, stopOnError: false)
+    }
+
+    /// Sends a session's namespace, database, token and variables to the
+    /// server. Throws on the first failure unless `stopOnError` is false, as
+    /// for a reconnect, where one failed step shouldn't skip the rest.
+    private func apply(session: SessionID?, context: SessionContext, stopOnError: Bool = true) async throws {
+        func step(_ method: String, _ params: [SurrealValue]) async throws {
+            do {
+                _ = try await performRPC(method, params: params, session: session)
+            } catch where !stopOnError {
+                return
+            }
+        }
         if context.namespace != nil || context.database != nil {
-            _ = try? await performRPC(
+            try await step(
                 "use",
-                params: [
+                [
                     context.namespace.map(SurrealValue.string) ?? .none,
                     context.database.map(SurrealValue.string) ?? .none,
-                ],
-                session: session
+                ]
             )
         }
         if let token = context.accessToken {
-            _ = try? await performRPC("authenticate", params: [.string(token)], session: session)
+            try await step("authenticate", [.string(token)])
+        }
+        for (name, value) in context.variables {
+            try await step("let", [.string(name), value])
         }
     }
 
@@ -215,7 +262,7 @@ actor SurrealClientCore {
     func signin(_ credentials: SignInCredentials, session: SessionID?) async throws -> AuthTokens {
         let context = try sessionContext(for: session)
         let payload = try credentials.payload(using: context)
-        let response = try await rpc("signin", params: [payload], session: session)
+        let response = try await rpc("signin", params: [payload], session: session, anonymous: true)
 
         let tokens = try parseAuthTokens(response)
         setSessionContext(for: session) { $0.accessToken = tokens.access }
@@ -225,15 +272,17 @@ actor SurrealClientCore {
     func signup(_ credentials: SignUpCredentials, session: SessionID?) async throws -> AuthTokens {
         let context = try sessionContext(for: session)
         let payload = try credentials.payload(using: context)
-        let response = try await rpc("signup", params: [payload], session: session)
+        let response = try await rpc("signup", params: [payload], session: session, anonymous: true)
 
         let tokens = try parseAuthTokens(response)
         setSessionContext(for: session) { $0.accessToken = tokens.access }
         return tokens
     }
 
+    // signin, signup and authenticate replace the stored token, so they're
+    // sent without it: over HTTP a stale one gets the request refused.
     func authenticate(_ token: String, session: SessionID?) async throws {
-        _ = try await rpc("authenticate", params: [.string(token)], session: session)
+        _ = try await rpc("authenticate", params: [.string(token)], session: session, anonymous: true)
         setSessionContext(for: session) { $0.accessToken = token }
     }
 
@@ -242,19 +291,111 @@ actor SurrealClientCore {
         setSessionContext(for: session) { $0.accessToken = nil }
     }
 
+    /// Defines `$name` on the server for this session (`let`). The value is
+    /// also kept locally: it's replayed after a reconnect and copied into
+    /// forks, and over HTTP, where the server keeps no session state, it's
+    /// sent with every query instead.
     func set(_ name: String, value: SurrealValue, session: SessionID?) async throws {
         _ = try sessionContext(for: session)
+        if serverKeepsState {
+            _ = try await rpc("let", params: [.string(name), value], session: session)
+        }
         setSessionContext(for: session) { $0.variables[name] = value }
     }
 
     func unset(_ name: String, session: SessionID?) async throws {
         _ = try sessionContext(for: session)
+        if serverKeepsState {
+            _ = try await rpc("unset", params: [.string(name)], session: session)
+        }
         setSessionContext(for: session) { $0.variables.removeValue(forKey: name) }
+    }
+
+    // MARK: - Server information and auth lifecycle
+
+    /// The server's version, without the `surrealdb-` prefix.
+    func version() async throws -> String {
+        // Sent without the stored token: over HTTP a stale one would get the
+        // request refused before connect() lets the caller re-authenticate.
+        let response = try await rpc("version", session: nil, anonymous: true)
+        switch response {
+        case .string(let raw):
+            return ServerVersion.strip(raw)
+        case .object(let fields):
+            // Newer servers answer { version, build, timestamp }.
+            if case .string(let raw)? = fields["version"] {
+                return ServerVersion.strip(raw)
+            }
+        default:
+            break
+        }
+        throw SurrealError.invalidResponse("Expected a version string or object.")
+    }
+
+    /// Checks `GET /health`. Throws if the server isn't healthy.
+    func health() async throws {
+        guard let http else {
+            throw SurrealError.unsupportedFeature("health() needs the server's HTTP endpoint.")
+        }
+        try await http.health()
+    }
+
+    /// The record of the signed-in user (`$auth`), or `NONE`.
+    func info(session: SessionID?) async throws -> SurrealValue {
+        try await rpc("info", session: session)
+    }
+
+    /// Exchanges a refresh token for a new token pair. The refresh token is
+    /// single-use: the server revokes it.
+    func refresh(_ tokens: AuthTokens, session: SessionID?) async throws -> AuthTokens {
+        guard tokens.refresh != nil else {
+            throw SurrealError.invalidCredentials("refresh() needs a refresh token; sign in with an access method that issues one.")
+        }
+        // Over HTTP the stored access token goes out as a Bearer header, and
+        // the server rejects an expired one before reading the body. Leave it
+        // off this request without forgetting it, in case refresh fails.
+        let response = try await rpc("refresh", params: [tokens.surrealValue], session: session, anonymous: true)
+        let refreshed = try parseAuthTokens(response)
+        setSessionContext(for: session) { $0.accessToken = refreshed.access }
+        return refreshed
+    }
+
+    /// Revokes a refresh token so it can't be used again.
+    func revoke(_ tokens: AuthTokens, session: SessionID?) async throws {
+        guard tokens.refresh != nil else {
+            throw SurrealError.invalidCredentials("revoke() needs a refresh token.")
+        }
+        // As for refresh: an expired access token must not block revoking.
+        _ = try await rpc("revoke", params: [tokens.surrealValue], session: session, anonymous: true)
+    }
+
+    /// Authenticates with a token pair. If the access token has expired and
+    /// there's a refresh token, refreshes the pair and returns the new one.
+    func authenticate(_ tokens: AuthTokens, session: SessionID?) async throws -> AuthTokens {
+        if tokens.refresh != nil, let expiry = tokens.accessExpiry, expiry <= Date() {
+            return try await refresh(tokens, session: session)
+        }
+        do {
+            try await authenticate(tokens.access, session: session)
+            return tokens
+        } catch let error as SurrealError where tokens.refresh != nil && error.isTokenExpired {
+            // Expired between the check above and the server seeing it.
+            return try await refresh(tokens, session: session)
+        }
+    }
+
+    /// Clears the session on the server: namespace, database, authentication
+    /// and variables.
+    func reset(session: SessionID?) async throws {
+        if serverKeepsState {
+            _ = try await rpc("reset", session: session)
+        }
+        setSessionContext(for: session) { $0 = SessionContext() }
     }
 
     func queryRaw(_ sql: String, bindings: [String: SurrealValue], session: SessionID?) async throws -> [RPCQueryResult] {
         let context = try sessionContext(for: session)
-        var mergedBindings = context.variables
+        var mergedBindings = serverKeepsState ? [:] : context.variables
         for (key, value) in bindings {
             mergedBindings[key] = value
         }
@@ -401,20 +542,25 @@ actor SurrealClientCore {
         _ = try await rpc("kill", params: [.uuid(liveQueryID)], session: session)
     }
 
-    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?) async throws -> SurrealValue {
+    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, anonymous: Bool = false) async throws -> SurrealValue {
         if let activeReplay {
             await activeReplay.value
         }
 
-        return try await performRPC(method, params: params, session: session)
+        return try await performRPC(method, params: params, session: session, anonymous: anonymous)
     }
 
     /// Ungated variant of `rpc`. The reconnect-replay path must use this
     /// directly: its own `use`/`authenticate` calls would otherwise hit the
     /// `activeReplay` gate above and await the replay task from within the
     /// replay task — deadlocking the whole client.
-    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?) async throws -> SurrealValue {
-        let context = try sessionContext(for: session)
+    /// `anonymous` leaves the stored access token off this one request (the
+    /// HTTP engine sends it as a Bearer header).
+    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, anonymous: Bool = false) async throws -> SurrealValue {
+        var context = try sessionContext(for: session)
+        if anonymous {
+            context.accessToken = nil
+        }
         let request = RPCRequest(
             id: UUID().uuidString.lowercased(),
             method: method,
