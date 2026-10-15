@@ -30,13 +30,18 @@ actor SurrealClientCore {
     func connect() async throws {
         try await engine.connect()
 
-        if checkServerVersion {
-            do {
+        do {
+            if checkServerVersion {
                 try ServerVersion.check(try await version())
-            } catch {
-                await engine.close()
-                throw error
             }
+            if serverKeepsState {
+                // A SessionContext passed at init only exists locally until
+                // it's applied to the new connection.
+                try await apply(session: nil, context: rootSession)
+            }
+        } catch {
+            await engine.close()
+            throw error
         }
 
         guard let liveEngine = engine as? any LiveRPCEngine else {
@@ -201,21 +206,34 @@ actor SurrealClientCore {
     /// skips the local context mutation the public `use`/`authenticate` do —
     /// the stored context already holds exactly the values being replayed.
     private func replay(session: SessionID?, context: SessionContext) async {
+        try? await apply(session: session, context: context, stopOnError: false)
+    }
+
+    /// Sends a session's namespace, database, token and variables to the
+    /// server. Throws on the first failure unless `stopOnError` is false, as
+    /// for a reconnect, where one failed step shouldn't skip the rest.
+    private func apply(session: SessionID?, context: SessionContext, stopOnError: Bool = true) async throws {
+        func step(_ method: String, _ params: [SurrealValue]) async throws {
+            do {
+                _ = try await performRPC(method, params: params, session: session)
+            } catch where !stopOnError {
+                return
+            }
+        }
         if context.namespace != nil || context.database != nil {
-            _ = try? await performRPC(
+            try await step(
                 "use",
-                params: [
+                [
                     context.namespace.map(SurrealValue.string) ?? .none,
                     context.database.map(SurrealValue.string) ?? .none,
-                ],
-                session: session
+                ]
             )
         }
         if let token = context.accessToken {
-            _ = try? await performRPC("authenticate", params: [.string(token)], session: session)
+            try await step("authenticate", [.string(token)])
         }
         for (name, value) in context.variables {
-            _ = try? await performRPC("let", params: [.string(name), value], session: session)
+            try await step("let", [.string(name), value])
         }
     }
 
@@ -321,12 +339,10 @@ actor SurrealClientCore {
         guard tokens.refresh != nil else {
             throw SurrealError.invalidCredentials("refresh() needs a refresh token; sign in with an access method that issues one.")
         }
-        if !serverKeepsState {
-            // Over HTTP the stored access token goes out as a Bearer header,
-            // and the server rejects an expired one before reading the body.
-            setSessionContext(for: session) { $0.accessToken = nil }
-        }
-        let response = try await rpc("refresh", params: [tokens.surrealValue], session: session)
+        // Over HTTP the stored access token goes out as a Bearer header, and
+        // the server rejects an expired one before reading the body. Leave it
+        // off this request without forgetting it, in case refresh fails.
+        let response = try await rpc("refresh", params: [tokens.surrealValue], session: session, anonymous: true)
         let refreshed = try parseAuthTokens(response)
         setSessionContext(for: session) { $0.accessToken = refreshed.access }
         return refreshed
@@ -337,7 +353,8 @@ actor SurrealClientCore {
         guard tokens.refresh != nil else {
             throw SurrealError.invalidCredentials("revoke() needs a refresh token.")
         }
-        _ = try await rpc("revoke", params: [tokens.surrealValue], session: session)
+        // As for refresh: an expired access token must not block revoking.
+        _ = try await rpc("revoke", params: [tokens.surrealValue], session: session, anonymous: true)
     }
 
     /// Authenticates with a token pair. If the access token has expired and
@@ -513,20 +530,25 @@ actor SurrealClientCore {
         _ = try await rpc("kill", params: [.uuid(liveQueryID)], session: session)
     }
 
-    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?) async throws -> SurrealValue {
+    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, anonymous: Bool = false) async throws -> SurrealValue {
         if let activeReplay {
             await activeReplay.value
         }
 
-        return try await performRPC(method, params: params, session: session)
+        return try await performRPC(method, params: params, session: session, anonymous: anonymous)
     }
 
     /// Ungated variant of `rpc`. The reconnect-replay path must use this
     /// directly: its own `use`/`authenticate` calls would otherwise hit the
     /// `activeReplay` gate above and await the replay task from within the
     /// replay task — deadlocking the whole client.
-    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?) async throws -> SurrealValue {
-        let context = try sessionContext(for: session)
+    /// `anonymous` leaves the stored access token off this one request (the
+    /// HTTP engine sends it as a Bearer header).
+    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, anonymous: Bool = false) async throws -> SurrealValue {
+        var context = try sessionContext(for: session)
+        if anonymous {
+            context.accessToken = nil
+        }
         let request = RPCRequest(
             id: UUID().uuidString.lowercased(),
             method: method,

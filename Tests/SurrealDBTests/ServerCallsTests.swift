@@ -155,7 +155,15 @@ func integration_infoRefreshAndRevoke() async throws {
         #expect(third.access != second.access)
         #expect(try await client.info(as: AppUser.self)?.email == "ada@example.com")
 
-        // revoke() makes the refresh token useless.
+        // A failed refresh doesn't sign the client out.
+        await #expect(throws: SurrealError.self) {
+            _ = try await client.refresh(AuthTokens(access: third.access, refresh: "not-a-refresh-token"))
+        }
+        #expect(try await client.info(as: AppUser.self)?.email == "ada@example.com")
+
+        // revoke() makes the refresh token useless, even once the access
+        // token has expired (over HTTP it used to be rejected for that).
+        try await Task.sleep(nanoseconds: 3_000_000_000)
         try await client.revoke(third)
         await #expect(throws: SurrealError.self) {
             _ = try await client.refresh(third)
@@ -169,4 +177,28 @@ func rpcError_causeMayBeNoneOrAString() {
     #expect(CBORSurrealCodec.decodeRPCCause(from: .null) == nil)
     #expect(CBORSurrealCodec.decodeRPCCause(from: .string("why"))?.message == "why")
     #expect(CBORSurrealCodec.decodeRPCCause(from: .object(["message": .string("why")]))?.message == "why")
+}
+
+@Test
+func integration_initialSessionContextIsAppliedOverWebSocket() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let signedIn = try await integrationClient(wsEndpoint())
+    guard case .string(let database)? = try await signedIn.queryRaw("RETURN session::db();").first?.result else {
+        Issue.record("Expected a database name")
+        return
+    }
+    _ = try await signedIn.queryRaw("CREATE thing:1 SET n = 1;")
+    let token = try await signedIn.signin(.root(username: IntegrationEnv.user ?? "root", password: IntegrationEnv.password ?? "root"))
+    await signedIn.close()
+
+    // Namespace, database, token and variables given at init used to stay
+    // local over WebSocket until a reconnect replayed them.
+    let client = try SurrealClient(
+        endpoint: wsEndpoint(),
+        session: SessionContext(namespace: IntegrationEnv.namespace, database: database, accessToken: token.access, variables: ["v": .int(7)])
+    )
+    try await client.connect()
+    defer { Task { await client.close() } }
+    #expect(try await client.queryRaw("RETURN [$v, (SELECT VALUE n FROM ONLY thing:1)];").first?.result == .array([.int(7), .int(1)]))
 }
