@@ -7,6 +7,22 @@ extension SurrealClientCore {
     private static let target = "_sdk_target"
     private static let data = "_sdk_data"
 
+    /// `$name`, read as the record, table or list of records `value` holds
+    /// whichever codec carried it: JSON sends all three as plain strings,
+    /// which UPDATE and RELATE won't take as targets.
+    private static func target(_ name: String, for value: SurrealValue) -> String {
+        switch value {
+        case .recordID:
+            return "type::record($\(name))"
+        case .table:
+            return "type::table($\(name))"
+        case .array(let items) where items.allSatisfy({ if case .recordID = $0 { true } else { false } }):
+            return "array::map($\(name), |$v| type::record($v))"
+        default:
+            return "$\(name)"
+        }
+    }
+
     private func run<T: Decodable & Sendable>(
         _ sql: String,
         _ bindings: [String: SurrealValue],
@@ -41,10 +57,12 @@ extension SurrealClientCore {
         txn: UUID? = nil
     ) async throws -> [Model] {
         var bindings: [String: SurrealValue] = [Self.target: target, Self.data: data]
-        var sql = "UPDATE $\(Self.target) MERGE $\(Self.data)"
+        var sql = "UPDATE \(Self.target(Self.target, for: target)) MERGE $\(Self.data)"
         if let predicate {
-            sql += " WHERE \(predicate.raw)"
-            bindings.merge(predicate.bindings) { current, _ in current }
+            // A predicate binding named like ours is renamed, not dropped.
+            let (raw, merged) = predicate.merged(into: bindings)
+            sql += " WHERE \(raw)"
+            bindings = merged
         }
         return try await run(sql + ";", bindings, session: session, txn: txn)
     }
@@ -57,7 +75,7 @@ extension SurrealClientCore {
         txn: UUID? = nil
     ) async throws -> Model? {
         let results: [Model] = try await run(
-            "UPDATE $\(Self.target) PATCH $\(Self.data);",
+            "UPDATE type::record($\(Self.target)) PATCH $\(Self.data);",
             [Self.target: .recordID(recordID), Self.data: .array(operations.map(\.surrealValue))],
             session: session,
             txn: txn
@@ -79,7 +97,8 @@ extension SurrealClientCore {
             "_sdk_edge": .table(edge),
             "_sdk_to": to.count == 1 ? .recordID(to[0]) : .array(to.map(SurrealValue.recordID)),
         ]
-        var sql = "RELATE $_sdk_from->$_sdk_edge->$_sdk_to"
+        let parts = ["_sdk_from", "_sdk_edge", "_sdk_to"].map { "(\(Self.target($0, for: bindings[$0]!)))" }
+        var sql = "RELATE " + parts.joined(separator: "->")
         if let content {
             sql += " CONTENT $\(Self.data)"
             bindings[Self.data] = content

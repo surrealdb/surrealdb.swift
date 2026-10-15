@@ -75,6 +75,7 @@ enum CBORSurrealCodec {
         map[.utf8String("method")] = .utf8String(request.method)
 
         if let params = request.params {
+            try params.forEach(checkDates)
             map[.utf8String("params")] = .array(params.map(toCBOR(_:)))
         }
         if let session = request.session {
@@ -474,10 +475,37 @@ enum CBORSurrealCodec {
 
     private static let unixToReferenceDate: Int64 = 978_307_200
 
+    /// Whether tag 12 can carry `date`: its whole seconds since 1970 must
+    /// fit an `Int64` (with room for the 1970/2001 offset).
+    static func canEncode(_ date: Date) -> Bool {
+        let seconds = date.timeIntervalSinceReferenceDate
+        return seconds.isFinite && seconds > -9.2e18 && seconds < 9.2e18
+    }
+
+    /// Throws for a datetime anywhere in `value` that tag 12 can't carry.
+    static func checkDates(_ value: SurrealValue) throws {
+        switch value {
+        case .datetime(let date) where !canEncode(date):
+            throw EncodingError.invalidValue(date, .init(codingPath: [], debugDescription: "\(date) is out of range for a SurrealDB datetime."))
+        case .array(let values), .set(let values):
+            try values.forEach(checkDates)
+        case .object(let fields):
+            try fields.values.forEach(checkDates)
+        case .recordID(let id):
+            try checkDates(id.id)
+        default:
+            break
+        }
+    }
+
     /// Splits a date into whole seconds since 1970 (floored) and nanoseconds.
     /// Works relative to 2001, where `Date` keeps its value, to lose as little
-    /// precision as possible.
+    /// precision as possible. Dates `canEncode` rejects are clamped, so this
+    /// never traps; `encode` refuses them before getting here.
     static func datetimeComponents(_ date: Date) -> (seconds: Int64, nanoseconds: UInt32) {
+        guard canEncode(date) else {
+            return (date.timeIntervalSinceReferenceDate > 0 ? .max : .min, 0)
+        }
         let sinceReference = date.timeIntervalSinceReferenceDate
         let whole = sinceReference.rounded(.down)
         var nanos = Int64(((sinceReference - whole) * 1_000_000_000).rounded())
