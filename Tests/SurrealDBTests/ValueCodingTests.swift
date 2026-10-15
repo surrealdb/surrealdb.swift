@@ -141,3 +141,57 @@ func valueCoding_datetimeWireFormKeepsPre1970AndSubseconds() throws {
 
     #expect(throws: SurrealError.self) { try CBORSurrealCodec.fromCBOR(.tagged(tag, .array([.unsignedInt(1)]))) }
 }
+
+private class Base: Encodable {
+    var a = 1
+}
+
+private final class Derived: Base {
+    var b = 2
+    private enum CodingKeys: String, CodingKey { case b }
+
+    override func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(b, forKey: .b)
+        // No `super` case in CodingKeys: this used to force-unwrap nil.
+        try super.encode(to: container.superEncoder())
+    }
+}
+
+private struct StrictNil: Decodable {
+    let x: Int?
+    private enum CodingKeys: String, CodingKey { case x }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        x = try container.decodeNil(forKey: .x) ? nil : try container.decode(Int.self, forKey: .x)
+    }
+}
+
+@Test
+func valueCoding_superEncoderWithoutSuperKey() throws {
+    #expect(try SurrealValue.fromEncodable(Derived()) == .object(["b": .int(2), "super": .object(["a": .int(1)])]))
+}
+
+@Test
+func valueCoding_rejectsValuesThatWouldChangeOrTrap() {
+    #expect(throws: DecodingError.self) { _ = try SurrealValue.double(1e100).decode(Float.self) }
+    #expect(throws: DecodingError.self) { _ = try SurrealValue.double(.infinity).decode(Decimal.self) }
+    #expect(throws: DecodingError.self) { _ = try SurrealValue.double(-.infinity).decode(Decimal.self) }
+    #expect(throws: DecodingError.self) { _ = try SurrealValue.decimal("12.5oops").decode(Decimal.self) }
+    #expect(throws: DecodingError.self) { _ = try SurrealValue.object([:]).decode(StrictNil.self) }
+    #expect((try? SurrealValue.double(.infinity).decode(Float.self)) == .infinity)
+    #expect((try? SurrealValue.decimal("12.5").decode(Decimal.self)) == Decimal(string: "12.5"))
+    #expect((try? SurrealValue.object(["x": .null]).decode(StrictNil.self)) != nil)
+}
+
+@Test
+func valueCoding_datetimeSecondsNearInt64MinDoNotTrap() throws {
+    let tag = CBOR.Tag(rawValue: 12)
+    let value = try CBORSurrealCodec.fromCBOR(.tagged(tag, .array([CBORSurrealCodec.cborInteger(.min), .unsignedInt(0)])))
+    guard case .datetime(let date) = value else {
+        Issue.record("Expected a datetime")
+        return
+    }
+    #expect(date.timeIntervalSince1970 < -9e18)
+}
