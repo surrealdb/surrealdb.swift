@@ -171,10 +171,12 @@ func integration_liveDiffSendsPatchOperations() async throws {
     _ = try await client.merge(recordID: id, with: ["text": SurrealValue.string("hello there world"), "n": .int(2)], as: Note.self)
 
     #expect(await eventually { collected.snapshot.count == 2 })
+    // The server doesn't promise to send notifications from separate
+    // requests in order, so look them up by action.
     let events = collected.snapshot
-    #expect(events.map(\.action) == [.create, .update])
-    #expect(events.first?.record == id)
-    let changes = try #require(events.last?.decoded)
+    #expect(Set(events.map(\.action)) == [.create, .update])
+    #expect(events.allSatisfy { $0.record == id })
+    let changes = try #require(events.first { $0.action == .update }?.decoded)
     #expect(changes.contains(.replace(path: "/n", value: .int(2))))
     #expect(changes.contains { if case .change(path: "/text", _) = $0 { return true } else { return false } })
 }
