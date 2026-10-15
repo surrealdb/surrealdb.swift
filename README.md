@@ -630,6 +630,51 @@ Sessions have their own: `session.beginTransaction()`. The server doesn't allow 
 
 ---
 
+## Functions and APIs
+
+`run` calls a server-side function by name:
+
+```swift
+let length = try await client.run("string::len", arguments: [.string("abcd")])  // .int(4)
+let greeting = try await client.run("fn::greet", arguments: [.string("Ada")], as: String.self)
+```
+
+`api` calls an endpoint defined with `DEFINE API`, through `api::invoke`, so it works over either transport:
+
+```swift
+let response = try await client.api(
+    "/users/ada",
+    method: .post,
+    body: .object(["name": .string("Ada")]),
+    headers: ["x-request-source": "app"],
+    query: ["verbose": "true"]
+)
+response.status                         // 201
+let user = try response.body(as: User.self)
+```
+
+A path or method with no endpoint returns status 404 rather than throwing.
+
+---
+
+## Import and Export
+
+Both use the server's HTTP routes, whichever transport the client uses, and act on the selected namespace and database with the client's credentials.
+
+```swift
+// Everything, as SurrealQL
+let dump = try await client.export()
+
+// Or a selection
+let users = try await client.export(SurrealExportOptions(tables: .only(["user"]), functions: false))
+
+try await other.import(dump)
+```
+
+An import must start with `OPTION IMPORT;`, as exports do. It isn't transactional: if some statements fail, the rest still apply, and `import` throws `SurrealError.importFailed` with the failures.
+
+---
+
 ## SurrealValue
 
 `SurrealValue` is the SDK's universal value type for working with raw SurrealDB data.

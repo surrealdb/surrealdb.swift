@@ -34,6 +34,10 @@ public enum SurrealError: Error, Sendable {
     /// The server's version is outside the range this SDK supports. Turn off
     /// `SurrealClientOptions.checkServerVersion` to connect anyway.
     case unsupportedServerVersion(version: String, supported: String)
+    /// Some statements in an import failed. The import isn't transactional:
+    /// every statement not listed here was applied. `index` counts the
+    /// failures, not the statements in the dump.
+    case importFailed([QueryErrorDetail])
 
     public var message: String {
         switch self {
@@ -70,6 +74,9 @@ public enum SurrealError: Error, Sendable {
             return "No such session: \(id)."
         case .unsupportedServerVersion(let version, let supported):
             return "SurrealDB \(version) is not supported; this SDK supports \(supported)."
+        case .importFailed(let errors):
+            let first = errors.first.map { ": \($0.message)" } ?? ""
+            return "\(errors.count) statement(s) in the import failed\(first)"
         }
     }
 

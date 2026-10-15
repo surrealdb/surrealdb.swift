@@ -6,7 +6,7 @@ actor SurrealClientCore {
     private var sessions: [SessionID: SessionContext] = [:]
     private var reconnectReplayTask: Task<Void, Never>?
     private var activeReplay: Task<Void, Never>?
-    private let http: HTTPEndpoints?
+    let http: HTTPEndpoints?
     private let checkServerVersion: Bool
 
     init(
@@ -65,7 +65,7 @@ actor SurrealClientCore {
 
     // MARK: - Session state lookup/mutation
 
-    private func sessionContext(for session: SessionID?) throws -> SessionContext {
+    func sessionContext(for session: SessionID?) throws -> SessionContext {
         guard let session else {
             return rootSession
         }
@@ -551,7 +551,7 @@ actor SurrealClientCore {
         _ = try await rpc("kill", params: [.uuid(liveQueryID)], session: session)
     }
 
-    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil) async throws -> SurrealValue {
+    func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil) async throws -> SurrealValue {
         if let activeReplay {
             await activeReplay.value
         }
@@ -616,14 +616,8 @@ actor SurrealClientCore {
 
         for (index, row) in results.enumerated() {
             if row.status == .err {
-                let message: String
-                if case .string(let queryError) = row.result {
-                    message = queryError
-                } else {
-                    message = "Unknown query error"
-                }
                 errors.append(
-                    QueryErrorDetail(index: index, message: message, kind: row.kind, details: row.details)
+                    QueryErrorDetail(index: index, message: row.errorMessage, kind: row.kind, details: row.details)
                 )
                 continue
             }
