@@ -62,6 +62,30 @@ public enum SurrealQL {
     private static func isASCIIDigit(_ scalar: Unicode.Scalar) -> Bool {
         ("0"..."9").contains(scalar)
     }
+
+    /// `$name`, cast to the value's SurrealDB type where the JSON wire
+    /// format would send it as a plain string (datetimes, UUIDs, decimals,
+    /// durations, record ids, bytes). The cast is a no-op over CBOR.
+    public static func typedParameter(_ name: String, for value: SurrealValue) -> String {
+        switch value {
+        case .datetime: return "<datetime>$\(name)"
+        case .uuid: return "<uuid>$\(name)"
+        case .decimal: return "<decimal>$\(name)"
+        case .duration: return "<duration>$\(name)"
+        case .recordID: return "<record>$\(name)"
+        case .bytes: return "<bytes>$\(name)"
+        default: return "$\(name)"
+        }
+    }
+
+    /// Replaces the parameter `$name` with `$newName` in SurrealQL text,
+    /// leaving longer names that start with `name` alone.
+    public static func renameParameter(_ name: String, to newName: String, in sql: String) -> String {
+        let pattern = "\\$" + NSRegularExpression.escapedPattern(for: name) + "(?![A-Za-z0-9_])"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return sql }
+        let range = NSRange(sql.startIndex..., in: sql)
+        return regex.stringByReplacingMatches(in: sql, range: range, withTemplate: NSRegularExpression.escapedTemplate(for: "$" + newName))
+    }
 }
 
 /// Hands out binding names for predicate values. Names only need to be unique
@@ -77,4 +101,5 @@ enum PredicateBindingNames {
         counter &+= 1
         return "_pv\(counter)"
     }
+
 }
