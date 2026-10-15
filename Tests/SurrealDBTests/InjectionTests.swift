@@ -139,3 +139,36 @@ func injection_renamingSkipsStringsAndComments() {
         == "b = $v9 AND note = '$value' AND q = \"$value\" AND `$value` = 1 -- $value\nAND c = $value2 AND d = $v9 /* $value */")
     #expect(SurrealQL.renameParameter("x", to: "y", in: #"s = 'it\'s $x' AND $x"#) == #"s = 'it\'s $x' AND $y"#)
 }
+
+@Test
+func injection_typedValuesInsideContainersAreInlined() {
+    let date = Date(timeIntervalSince1970: 0)
+    let nested = SurrealField<PlainModel, SurrealValue>("schedule") == .array([.datetime(date), .string("x")])
+    #expect(nested.bindings.isEmpty)
+    #expect(nested.raw == "`schedule` = [d\"1970-01-01T00:00:00.000Z\", \"x\"]")
+    // Plain containers are still bound.
+    let plain = SurrealField<PlainModel, SurrealValue>("tags") == .array([.string("a")])
+    #expect(plain.bindings.count == 1)
+}
+
+@Test
+func injection_renamingAvoidsNamesAlreadyInUse() {
+    let lhs = SurrealPredicate(raw: "a = $x", bindings: ["x": .int(1)])
+    // The name the last predicate got tells us what the counter hands out next.
+    let last = try! #require((SurrealField<PlainModel, Int>("p") == 1).bindings.keys.first)
+    let following = "_pv\(UInt64(last.dropFirst(3))! + 1)"
+    // The right-hand side already uses the name the counter hands out next.
+    let rhs = SurrealPredicate(raw: "b = $x AND c = $\(following)", bindings: ["x": .int(2), following: .int(3)])
+    let combined = lhs && rhs
+    #expect(combined.bindings[following] == .int(3))
+    #expect(Set(combined.bindings.values) == Set<SurrealValue>([.int(1), .int(2), .int(3)]))
+}
+
+@Test
+func injection_fieldPathsKeepArrayParts() {
+    #expect(SurrealQL.escapeFieldPath("results[0].score") == "`results`[0].`score`")
+    #expect(SurrealQL.escapeFieldPath("tags[*]") == "`tags`[*]")
+    #expect(SurrealQL.escapeFieldPath("tags[$]") == "`tags`[$]")
+    #expect(SurrealQL.escapeFieldPath("odd[x]") == "`odd[x]`")
+    #expect(SurrealValue.double(.nan).sqlLiteral == "NaN")
+}

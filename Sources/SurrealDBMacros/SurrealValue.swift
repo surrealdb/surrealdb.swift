@@ -19,11 +19,14 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
     /// Parses the text form the server sends record ids in over JSON
     /// (`person:alice`, ``person:`123` ``, `person:⟨a b⟩`, `person:42`).
     /// Integer keys become `.int`, `u'…'` keys `.uuid`, and identifier keys
-    /// `.string`. `nil` without a `table:`, and for array and object keys,
-    /// which this doesn't parse: a guess would name a different record.
+    /// `.string`. `nil` without a `table:`, and for array, object and
+    /// record-id keys, which this doesn't parse.
     public init?(parsing text: String) {
         guard let (table, rest) = Self.splitTable(text), !rest.isEmpty else { return nil }
-        if rest.first == "[" || rest.first == "{" {
+        // Array and object keys, and keys that are themselves record ids
+        // (`outer:person:alice`), aren't parsed: a guess would name a
+        // different record.
+        if rest.first == "[" || rest.first == "{" || (Self.unwrap(rest) == nil && rest.contains(":")) {
             return nil
         }
         self.table = table
@@ -71,6 +74,28 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         return UUID(uuidString: String(key.dropFirst(2).dropLast()))
     }
 
+    /// A range key as SurrealQL writes it after `table:`, such as `1..=4`
+    /// or `` `a`>.. ``. String bounds are identifiers here, not strings.
+    static func rangeKeyText(_ range: SurrealRange) -> String {
+        func key(_ value: SurrealValue) -> String {
+            if case .string(let text) = value { return SurrealQL.escapeIdent(text) }
+            return value.sqlLiteral
+        }
+        var text = ""
+        switch range.begin {
+        case .included(let value): text += key(value)
+        case .excluded(let value): text += key(value) + ">"
+        case .unbounded: break
+        }
+        text += ".."
+        switch range.end {
+        case .included(let value): text += "=" + key(value)
+        case .excluded(let value): text += key(value)
+        case .unbounded: break
+        }
+        return text
+    }
+
     /// The contents of a `` `...` `` or `⟨...⟩` key, unescaped.
     private static func unwrap(_ key: String) -> String? {
         guard let open = key.first, let last = key.last, key.count >= 2,
@@ -95,6 +120,8 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         switch id {
         case .string(let value):
             return SurrealQL.displayIdent(value)
+        case .range(let range):
+            return Self.rangeKeyText(range)
         default:
             return id.sqlLiteral
         }
@@ -353,7 +380,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .int(let value):
             return "\(value)"
         case .double(let value):
-            if value.isNaN { return "math::nan" }
+            if value.isNaN { return "NaN" }
             if value.isInfinite { return value > 0 ? "math::inf" : "math::neg_inf" }
             return "\(value)f"
         case .string(let value):
