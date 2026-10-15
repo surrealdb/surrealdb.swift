@@ -16,6 +16,67 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         "\(SurrealQL.displayIdent(table)):\(idText)"
     }
 
+    /// Parses the text form the server sends record ids in over JSON
+    /// (`person:alice`, ``person:`123` ``, `person:⟨a b⟩`, `person:42`).
+    /// Integer keys become `.int`, everything else `.string`; complex keys
+    /// (arrays, objects) are kept as their text. `nil` without a `table:`.
+    public init?(parsing text: String) {
+        guard let (table, rest) = Self.splitTable(text), !rest.isEmpty else { return nil }
+        self.table = table
+        if let int = Int64(rest), rest.first != "+" {
+            self.id = .int(int)
+        } else if let unwrapped = Self.unwrap(rest) {
+            self.id = .string(unwrapped)
+        } else {
+            self.id = .string(rest)
+        }
+    }
+
+    private static func splitTable(_ text: String) -> (String, String)? {
+        if text.first == "`" || text.first == "⟨" {
+            let close: Character = text.first == "`" ? "`" : "⟩"
+            var escaped = false
+            var name = ""
+            for (offset, char) in text.dropFirst().enumerated() {
+                if escaped {
+                    name.append(char)
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == close {
+                    let rest = text.dropFirst(offset + 2)
+                    guard rest.first == ":" else { return nil }
+                    return (name, String(rest.dropFirst()))
+                } else {
+                    name.append(char)
+                }
+            }
+            return nil
+        }
+        guard let colon = text.firstIndex(of: ":") else { return nil }
+        return (String(text[..<colon]), String(text[text.index(after: colon)...]))
+    }
+
+    /// The contents of a `` `...` `` or `⟨...⟩` key, unescaped.
+    private static func unwrap(_ key: String) -> String? {
+        guard let open = key.first, let last = key.last, key.count >= 2,
+              (open == "`" && last == "`") || (open == "⟨" && last == "⟩")
+        else { return nil }
+        var result = ""
+        var escaped = false
+        for char in key.dropFirst().dropLast() {
+            if escaped {
+                result.append(char)
+                escaped = false
+            } else if char == "\\" {
+                escaped = true
+            } else {
+                result.append(char)
+            }
+        }
+        return result
+    }
+
     private var idText: String {
         switch id {
         case .string(let value):
@@ -48,12 +109,26 @@ public struct SurrealFileRef: Sendable, Hashable, Codable {
     public let bucket: String
     public let key: String
 
+    /// `key` is the file's path in the bucket. It always starts with `/`,
+    /// which is added when missing, as the server does.
     public init(bucket: String, key: String) {
         self.bucket = bucket
-        self.key = key
+        self.key = key.hasPrefix("/") ? key : "/" + key
     }
 
-    /// `bucket:key`, as inside the `f"..."` literal.
+    private enum CodingKeys: String, CodingKey {
+        case bucket, key
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            bucket: try container.decode(String.self, forKey: .bucket),
+            key: try container.decode(String.self, forKey: .key)
+        )
+    }
+
+    /// `bucket:/key`, as inside the `f"..."` literal.
     public var rawValue: String {
         "\(bucket):\(key)"
     }
@@ -290,7 +365,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .geometry:
             return "<geometry>"
         case .file(let value):
-            return "f\(SurrealQL.quote(value.rawValue))"
+            // File literals take no escapes, so build it from strings.
+            return "type::file(\(SurrealQL.quote(value.bucket)), \(SurrealQL.quote(value.key)))"
         case .array(let value):
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .object(let value):

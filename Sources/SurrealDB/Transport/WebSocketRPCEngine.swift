@@ -33,6 +33,15 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     /// one drop starts one reconnect loop, not two.
     private var generation = 0
 
+    /// Bumped for every connection attempt. An attempt that finishes its
+    /// handshake after a newer one started (an overlapping `connect()`, or
+    /// one that cancelled a reconnect mid-handshake) discards its socket
+    /// instead of replacing the newer one's.
+    private var attempt = 0
+
+    /// The `connect()` in flight, which overlapping calls wait for.
+    private var pendingConnect: Task<Void, Error>?
+
     init(
         endpoint: URL,
         clientOptions: SurrealClientOptions,
@@ -48,10 +57,16 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     func connect() async throws {
+        if let pendingConnect {
+            return try await pendingConnect.value
+        }
         closedByClient = false
         reconnectTask?.cancel()
         reconnectTask = nil
-        try await establishSocket()
+        let connecting = Task { try await self.establishSocket() }
+        pendingConnect = connecting
+        defer { pendingConnect = nil }
+        try await connecting.value
     }
 
     func close() async {
@@ -88,7 +103,9 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             throw SurrealError.notConnected
         }
 
-        let id = request.id
+        // The server echoes UUID-shaped ids lowercased over JSON, so match
+        // replies case-insensitively.
+        let id = request.id.lowercased()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 // Runs on the actor before onCancel's task can, so a request
@@ -208,6 +225,8 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     /// failing every request. (A WebSocket-level ping sent before the
     /// handshake finishes can go unanswered forever, so it isn't used here.)
     private func establishSocket() async throws {
+        attempt += 1
+        let thisAttempt = attempt
         tearDownSocket(closeCode: .goingAway)
 
         let socket = urlSession.webSocketTask(with: endpoint, protocols: codec.websocketSubprotocols)
@@ -225,8 +244,8 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             throw SurrealError.connectionLost(cause: error)
         }
 
-        // close() may have run while we waited.
-        guard !closedByClient else {
+        // close() may have run while we waited, or a newer attempt started.
+        guard !closedByClient, thisAttempt == attempt else {
             socket.cancel(with: .normalClosure, reason: nil)
             throw SurrealError.notConnected
         }
@@ -240,7 +259,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     private static func handshake(_ socket: URLSessionWebSocketTask, codec: any WireCodec) async throws {
-        let id = UUID().uuidString
+        let id = UUID().uuidString.lowercased()
         let request = RPCRequest(id: id, method: "ping", params: nil, session: nil, txn: nil)
         try await socket.send(.data(try codec.encode(request)))
 
@@ -260,7 +279,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         if let error = envelope.error {
             throw SurrealError.serverError(error)
         }
-        guard envelope.id == id else {
+        guard envelope.id?.lowercased() == id else {
             throw SurrealError.invalidResponse("Unexpected reply to the connect ping.")
         }
     }
@@ -349,7 +368,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func handleIncoming(_ data: Data) async throws {
         let response = try codec.decodeEnvelope(data)
 
-        if let id = response.id, let continuation = takePending(id) {
+        if let id = response.id?.lowercased(), let continuation = takePending(id) {
             continuation.resume(returning: response)
             return
         }

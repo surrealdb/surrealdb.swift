@@ -169,12 +169,22 @@ extension SurrealClientCore {
         guard let http else {
             throw SurrealError.unsupportedFeature("import needs the server's HTTP endpoint.")
         }
+        // These go straight to URLSession, so check the client is connected
+        // as the RPC engines do.
+        guard isConnected else {
+            throw SurrealError.notConnected
+        }
         try await http.importSQL(sql, session: sessionContext(for: session))
     }
 
     func export(_ options: SurrealExportOptions?, session: SessionID?) async throws -> String {
         guard let http else {
             throw SurrealError.unsupportedFeature("export needs the server's HTTP endpoint.")
+        }
+        // These go straight to URLSession, so check the client is connected
+        // as the RPC engines do.
+        guard isConnected else {
+            throw SurrealError.notConnected
         }
         return try await http.export(options, session: sessionContext(for: session))
     }

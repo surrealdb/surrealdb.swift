@@ -108,3 +108,37 @@ func integration_withTransactionCommitsOrCancels() async throws {
     }
     #expect(try await client.select(Account.self).count == 2)
 }
+
+@Test
+func integration_withTransactionCancelsWhenTheTaskIsCancelled() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let client = try await integrationClient(wsEndpoint())
+    defer { Task { await client.close() } }
+    _ = try await client.queryRaw("DEFINE TABLE account SCHEMALESS;")
+
+    let started = AsyncStream<SurrealInteractiveTransaction>.makeStream()
+    let work = Task {
+        try await client.withTransaction { tx in
+            _ = try await tx.create(Account(name: "ghost", balance: 1))
+            started.continuation.yield(tx)
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+        }
+    }
+    var captured: SurrealInteractiveTransaction?
+    for await tx in started.stream {
+        captured = tx
+        break
+    }
+    work.cancel()
+    _ = await work.result
+
+    // The cancel reached the server, so the transaction is gone: committing
+    // it fails and the write never appears. (When the cancel was refused in
+    // the cancelled task, this commit succeeded.)
+    let tx = try #require(captured)
+    await #expect(throws: SurrealError.self) {
+        try await tx.commit()
+    }
+    #expect(try await client.select(Account.self).isEmpty)
+}

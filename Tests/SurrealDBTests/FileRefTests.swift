@@ -26,7 +26,17 @@ func fileRef_codableAndLiteral() throws {
     #expect(value == .object(["name": .string("a"), "file": .file(file)]))
     #expect(try value.decode(Document.self) == Document(name: "a", file: file))
     #expect(try SurrealValue.file(file).decode(String.self) == "docs:/a \"b\".txt")
-    #expect(SurrealValue.file(file).sqlLiteral == #"f"docs:/a \"b\".txt""#)
+    #expect(SurrealValue.file(file).sqlLiteral == #"type::file("docs", "/a \"b\".txt")"#)
+}
+
+@Test
+func fileRef_keyAlwaysStartsWithASlash() throws {
+    let file = SurrealFileRef(bucket: "docs", key: "report.pdf")
+    #expect(file.key == "/report.pdf")
+    #expect(file.rawValue == "docs:/report.pdf")
+    #expect(file == SurrealFileRef(bucket: "docs", key: "/report.pdf"))
+    let decoded = try JSONDecoder().decode(SurrealFileRef.self, from: Data(#"{"bucket":"docs","key":"report.pdf"}"#.utf8))
+    #expect(decoded.key == "/report.pdf")
 }
 
 /// Files are experimental: the server must run with
@@ -45,6 +55,11 @@ func integration_fileRefsRoundTripThroughTheServer() async throws {
             return
         }
         #expect(probe?.result == .file(SurrealFileRef(bucket: "docs", key: "/probe.txt")))
+
+        // The literal parses back to the same file, whatever the key holds.
+        let odd = SurrealValue.file(SurrealFileRef(bucket: "docs", key: #"a "b"\c é.txt"#))
+        let same = try await client.queryRaw("RETURN \(odd.sqlLiteral) == $f;", bindings: ["f": odd]).first?.result
+        #expect(same == .bool(true))
 
         _ = try await client.queryRaw(#"DEFINE BUCKET docs BACKEND "memory";"#)
         let file = SurrealFileRef(bucket: "docs", key: "/notes/hello.txt")
