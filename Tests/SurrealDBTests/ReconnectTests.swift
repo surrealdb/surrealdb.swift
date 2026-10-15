@@ -183,7 +183,7 @@ func integration_closeAbandonsAConnectStillInHandshake() async throws {
 
 @Test
 func integration_cancellingConnectAbandonsTheHandshake() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
