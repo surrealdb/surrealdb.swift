@@ -48,7 +48,7 @@ func import_failedStatementsInA200AreReported() async throws {
         try await endpoints.importSQL("OPTION IMPORT; CREATE keep:z; CREATE keep:a;", session: SessionContext())
         Issue.record("Expected importFailed")
     } catch SurrealError.importFailed(let failures) {
-        #expect(failures.map(\.index) == [1])
+        #expect(failures.map(\.index) == [0])
         #expect(failures.first?.message.contains("keep:a") == true)
     }
 
