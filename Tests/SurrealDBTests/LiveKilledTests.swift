@@ -80,8 +80,13 @@ func recordID_parsesTheServersTextForm() {
     #expect(SurrealRecordID(parsing: "person:⟨a b⟩") == SurrealRecordID(table: "person", id: .string("a b")))
     #expect(SurrealRecordID(parsing: "`we:ird`:x") == SurrealRecordID(table: "we:ird", id: .string("x")))
     #expect(SurrealRecordID(parsing: "nocolon") == nil)
+    // Typed keys keep their type, or aren't guessed at.
+    let uuid = UUID()
+    #expect(SurrealRecordID(parsing: "t:u'\(uuid.uuidString.lowercased())'") == SurrealRecordID(table: "t", id: .uuid(uuid)))
+    #expect(SurrealRecordID(parsing: "t:[1, 'a']") == nil)
+    #expect(SurrealRecordID(parsing: "t:{ a: 1 }") == nil)
     // Round-trips what rawValue renders.
-    for id in [SurrealRecordID(table: "t", id: .string("a b")), SurrealRecordID(table: "t", id: .int(-5)), SurrealRecordID(table: "t", id: .string("007"))] {
+    for id in [SurrealRecordID(table: "t", id: .string("a b")), SurrealRecordID(table: "t", id: .int(-5)), SurrealRecordID(table: "t", id: .string("007")), SurrealRecordID(table: "t", id: .uuid(uuid))] {
         #expect(SurrealRecordID(parsing: id.rawValue) == id)
     }
 }

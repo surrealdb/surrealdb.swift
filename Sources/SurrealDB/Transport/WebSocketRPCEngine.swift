@@ -33,6 +33,9 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
     /// The `connect()` in flight, which overlapping calls wait for.
     private var pendingConnect: Task<Void, Error>?
+    /// The socket an attempt is handshaking on, before it becomes `task`.
+    /// close() cancels it, so the attempt fails at once.
+    private var connectingSocket: URLSessionWebSocketTask?
 
     init(
         endpoint: URL,
@@ -57,7 +60,13 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         reconnectTask = nil
         let connecting = Task { try await self.establishSocket() }
         pendingConnect = connecting
-        defer { pendingConnect = nil }
+        defer {
+            // close() may have dropped this attempt and a newer connect()
+            // started its own.
+            if pendingConnect == connecting {
+                pendingConnect = nil
+            }
+        }
         try await connecting.value
     }
 
@@ -68,6 +77,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
         reconnectTask?.cancel()
         reconnectTask = nil
+        pendingConnect?.cancel()
+        pendingConnect = nil
+        connectingSocket?.cancel(with: .normalClosure, reason: nil)
+        connectingSocket = nil
 
         tearDownSocket(closeCode: .normalClosure)
 
@@ -169,6 +182,12 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
         let socket = urlSession.webSocketTask(with: endpoint, protocols: codec.websocketSubprotocols)
         socket.resume()
+        connectingSocket = socket
+        defer {
+            if connectingSocket === socket {
+                connectingSocket = nil
+            }
+        }
 
         do {
             try await withTimeout(seconds: clientOptions.requestTimeout) { [codec] in

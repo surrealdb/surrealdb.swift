@@ -17,10 +17,21 @@ final class TCPProxy: @unchecked Sendable {
     private(set) var port: UInt16 = 0
 
     /// `upstream` is `host:port`.
+    /// `upstream` is `host[:port]` or a URL such as `ws://host:port/rpc`,
+    /// the two forms `SURREALDB_HOST` takes.
     init(upstream: String) {
+        let (host, port) = Self.hostAndPort(upstream)
+        upstreamHost = NWEndpoint.Host(host)
+        upstreamPort = NWEndpoint.Port(rawValue: port)!
+    }
+
+    static func hostAndPort(_ upstream: String) -> (String, UInt16) {
+        if upstream.contains("://"), let url = URL(string: upstream), let host = url.host {
+            let defaultPort: UInt16 = ["https", "wss"].contains(url.scheme ?? "") ? 443 : 8000
+            return (host, url.port.flatMap { UInt16(exactly: $0) } ?? defaultPort)
+        }
         let parts = upstream.split(separator: ":")
-        upstreamHost = NWEndpoint.Host(String(parts[0]))
-        upstreamPort = NWEndpoint.Port(rawValue: UInt16(parts.count > 1 ? String(parts[1]) : "8000") ?? 8000)!
+        return (String(parts[0]), UInt16(parts.count > 1 ? String(parts[1]) : "8000") ?? 8000)
     }
 
     /// Starts listening, on the same port as before when restarted.
