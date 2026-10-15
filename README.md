@@ -437,6 +437,58 @@ let id = SurrealRecordID(table: "person", id: .string("ada"))
 let record: Person? = try await client.delete(recordID: id, as: Person.self)
 ```
 
+### Insert
+
+```swift
+// Several records in one statement
+let people = try await client.insert([ada, grace])
+
+// Edges into a relation table; each needs `in` and `out`
+let edges = try await client.insertRelation([Knows(from: adaID, to: graceID, since: 1843)])
+```
+
+### Merge and Patch
+
+`merge` changes only the fields you pass. Use a dictionary or a type holding just those fields. A `nil` optional property is left out of the encoded value, so that field keeps its value; to clear a field, pass `SurrealValue.null` for it (`["nickname": SurrealValue.null]`).
+
+```swift
+let id = SurrealRecordID(table: "person", id: .string("ada"))
+let updated = try await client.merge(recordID: id, with: ["age": SurrealValue.int(37)], as: Person.self)
+
+// Every matching record
+try await client.merge(Person.self, with: ["active": true], where: Person.Fields.age >= 18)
+```
+
+`patch` applies [JSON Patch](https://datatracker.ietf.org/doc/html/rfc6902) operations. If any operation fails, including a `test`, the record is left as it was.
+
+```swift
+try await client.patch(recordID: id, [
+    .test(path: "/name", value: .string("Ada")),
+    .replace(path: "/age", value: .int(37)),
+], as: Person.self)
+```
+
+### Relate
+
+```swift
+let edge = try await client.relate(adaID, "knows", graceID, content: .object(["since": .int(1843)]), as: Knows.self)
+
+// From each record in one list to each in the other
+try await client.relate([adaID], "knows", [graceID, alanID], as: Knows.self)
+```
+
+### Record ranges
+
+A `SurrealRecordRange` selects the records of a table whose ids fall in a range. Swift ranges of `Int64` convert directly; for other key types, build the bounds yourself.
+
+```swift
+let firstTen = try await client.select(range: SurrealRecordRange(table: "log", range: SurrealRange(1...10)), as: LogEntry.self)
+try await client.merge(range: SurrealRecordRange(table: "log", range: SurrealRange(11...)), with: ["archived": true], as: LogEntry.self)
+try await client.delete(range: SurrealRecordRange(table: "log", range: SurrealRange(..<1)), as: LogEntry.self)
+```
+
+All of these are also available on sessions and interactive transactions.
+
 ---
 
 ## Predicates

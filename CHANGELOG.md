@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `run(_:version:arguments:)` calls a server-side function by name, with a typed `run(_:version:arguments:as:)`.
 - `api(_:method:body:headers:query:)` calls a `DEFINE API` endpoint through `api::invoke` and returns a `SurrealAPIResponse` (status, headers, body).
 - `export(_:)` and `import(_:)` over the server's HTTP `/export` and `/import` routes, from either transport. `SurrealExportOptions` picks tables and definitions; a partly applied import throws the new `SurrealError.importFailed`.
+- `insert(_:)` and `insertRelation(_:)` insert one or many records (or edges) in a single statement.
+- `merge(recordID:with:as:)` and `merge(_:with:where:)` merge fields into records; `patch(recordID:_:as:)` applies JSON Patch operations (`SurrealPatchOperation`).
+- `relate(_:_:_:content:as:)` creates edges, from one record to another or from each record in one list to each in another.
+- Record ranges: `SurrealRecordRange` with `select(range:as:)`, `merge(range:with:as:)` and `delete(range:as:)`. `SurrealRange` can be built from Swift `Int64` ranges (`1...10`, `1..<10`, `5...`, `..<5`, `...5`).
 
 ### Security
 - Fixed SurrealQL injection in generated queries. Predicate values (`Person.Fields.name == x`) are now sent as bound variables instead of being spliced into the statement; table and field names are always backtick-escaped; record-id operations (`select(recordID:)`, `create(recordID:)` and the rest) send the id as a bound value; and `SurrealValue.sqlLiteral` now escapes backslashes, so a value ending in `\` can no longer close its own string. `SurrealPredicate` gains a `bindings` dictionary, and `SurrealPredicateValue` now requires `surrealPredicateValue: SurrealValue` in place of `surrealPredicateSQL` (source-breaking for custom conformances).
