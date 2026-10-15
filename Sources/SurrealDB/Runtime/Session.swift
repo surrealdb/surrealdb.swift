@@ -161,7 +161,8 @@ public struct SurrealSession: SurrealLiveQueryable {
 
     /// Merges `data` into a record, leaving fields it doesn't mention alone.
     /// `data` is usually a dictionary or a type with just the fields to
-    /// change: a `nil` optional would set that field to `NULL`.
+    /// change. A `nil` optional property is left out, so that field keeps
+    /// its value; to clear a field, pass `SurrealValue.null` for it.
     public func merge<Model: Decodable & Sendable>(
         recordID: SurrealRecordID,
         with data: some Encodable & Sendable,

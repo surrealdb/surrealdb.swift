@@ -464,7 +464,7 @@ let edges = try await client.insertRelation([Knows(from: adaID, to: graceID, sin
 
 ### Merge and Patch
 
-`merge` changes only the fields you pass. Use a dictionary or a type holding just those fields: a `nil` optional would set its field to `NULL`.
+`merge` changes only the fields you pass. Use a dictionary or a type holding just those fields. A `nil` optional property is left out of the encoded value, so that field keeps its value; to clear a field, pass `SurrealValue.null` for it (`["nickname": SurrealValue.null]`).
 
 ```swift
 let id = SurrealRecordID(table: "person", id: .string("ada"))
@@ -600,7 +600,7 @@ for await event in stream {
 }
 ```
 
-Stop listening by ending the stream (cancel the task iterating it, or `break` out): the SDK kills the live query on the server. You can also kill it yourself with `client.kill(liveQueryID: event.queryID)`.
+To stop listening, cancel the task iterating the stream, or let go of every reference to the stream: either ends it, and the SDK then kills the live query on the server. `break` on its own isn't enough while something still holds the stream. You can also kill it yourself with `client.kill(liveQueryID: event.queryID)`.
 
 If the WebSocket drops and reconnects, the client re-issues every live query it started with `live(_:)` and keeps the same stream going. Notifications sent while the connection was down are lost, and the server gives the re-issued query a new id, so `event.queryID` changes. If the reconnect fails for good, the streams finish.
 
@@ -1129,7 +1129,7 @@ Integration environment variables:
 | `SURREALDB_PASSWORD` | _(unset)_ | If unset, sign-in is skipped. |
 | `SURREALDB_AUTH_LEVEL` | `root` | One of `root`, `namespace` / `ns`, `database` / `db`. |
 
-`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to choose the `surreal` binary, or `SURREALDB_IMAGE_TAG` for the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build.
+`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to test a particular `surreal` binary (this runs it locally even when Docker is available), or `SURREALDB_IMAGE_TAG` to choose the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build.
 
 ---
 

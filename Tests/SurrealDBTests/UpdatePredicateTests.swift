@@ -52,5 +52,12 @@ func integration_updateTouchesOnlyMatchingRecords() async throws {
         let all = try await client.updateAll(Member.self, content: Member(name: "x", role: "guest"))
         #expect(all.count == 2)
         #expect(Set(try await client.select(Member.self).map(\.role)) == ["guest"])
+
+        // upsertAll updates every record too, rather than inserting one.
+        let upsertedAll = try await client.upsertAll(Member.self, content: Member(name: "y", role: "owner"))
+        #expect(upsertedAll.count == 2)
+        let after = try await client.select(Member.self)
+        #expect(after.count == 2)
+        #expect(Set(after.map(\.role)) == ["owner"])
     }
 }

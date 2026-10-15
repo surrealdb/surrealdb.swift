@@ -29,16 +29,15 @@ final class ConnectionStatusBroadcaster: @unchecked Sendable {
     }
 
     /// Records a new status and tells subscribers, unless it's unchanged.
+    /// Yields under the lock, so concurrent sends reach every subscriber in
+    /// the order they changed `current`. `yield` only buffers, so it's
+    /// cheap there.
     func send(_ newStatus: SurrealConnectionStatus) {
         lock.lock()
-        guard newStatus != status else {
-            lock.unlock()
-            return
-        }
+        defer { lock.unlock() }
+        guard newStatus != status else { return }
         status = newStatus
-        let continuations = Array(subscribers.values)
-        lock.unlock()
-        for continuation in continuations {
+        for continuation in subscribers.values {
             continuation.yield(newStatus)
         }
     }

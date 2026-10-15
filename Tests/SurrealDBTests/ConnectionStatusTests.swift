@@ -98,3 +98,58 @@ func integration_connectionStatusFollowsReconnects() async throws {
     #expect(client.connectionStatus == .disconnected)
     #expect(await eventually { Array(log.all.suffix(3)) == [.connecting, .connected, .disconnected] }, "\(log.all)")
 }
+
+/// A live engine that can park the reconnect replay's `use` call.
+private actor HeldReplayEngine: LiveRPCEngine {
+    private var reconnectContinuation: AsyncStream<Void>.Continuation?
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private(set) var uses = 0
+
+    func connect() async throws {}
+    func close() async {}
+
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        if request.method == "use" {
+            uses += 1
+            if holding {
+                await withCheckedContinuation { held.append($0) }
+            }
+        }
+        return RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
+    }
+
+    func hold() { holding = true }
+
+    func release() {
+        holding = false
+        held.forEach { $0.resume() }
+        held = []
+    }
+
+    func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> { AsyncStream { $0.finish() } }
+    func closeLiveStream(for queryID: UUID) async {}
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async {}
+    func reconnectEvents() -> AsyncStream<Void> { AsyncStream { self.reconnectContinuation = $0 } }
+    func fireReconnect() { reconnectContinuation?.yield(()) }
+    func hasSubscriber() -> Bool { reconnectContinuation != nil }
+}
+
+@Test
+func connectionStatus_closeDuringReplayStaysDisconnected() async throws {
+    let engine = HeldReplayEngine()
+    let status = ConnectionStatusBroadcaster()
+    let core = SurrealClientCore(engine: engine, sessionContext: SessionContext(namespace: "ns", database: "db"), status: status)
+    try await core.connect()
+    #expect(await eventually { await engine.hasSubscriber() })
+
+    await engine.hold()
+    await engine.fireReconnect()
+    #expect(await eventually { await engine.uses >= 1 })
+
+    await core.close()
+    #expect(status.current == .disconnected)
+    await engine.release()
+    try await Task.sleep(nanoseconds: 300_000_000)
+    #expect(status.current == .disconnected)
+}

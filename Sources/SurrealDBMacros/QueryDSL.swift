@@ -46,18 +46,34 @@ public struct SurrealPredicate: Sendable, Hashable, ExpressibleByStringLiteral, 
     public var description: String { raw }
 }
 
-private func merged(_ lhs: [String: SurrealValue], _ rhs: [String: SurrealValue]) -> [String: SurrealValue] {
-    lhs.merging(rhs) { current, _ in current }
+/// Combines two predicates' bindings. If both bind the same name to
+/// different values, the right-hand one is renamed (in its bindings and its
+/// `raw` text), so each side keeps the value it was built with.
+private func combine(
+    _ lhs: SurrealPredicate,
+    _ rhs: SurrealPredicate,
+    _ join: (String, String) -> String
+) -> SurrealPredicate {
+    var bindings = lhs.bindings
+    var rhsRaw = rhs.raw
+    for (name, value) in rhs.bindings.sorted(by: { $0.key < $1.key }) {
+        guard let existing = bindings[name], existing != value else {
+            bindings[name] = value
+            continue
+        }
+        let renamed = PredicateBindingNames.next()
+        rhsRaw = SurrealQL.renameParameter(name, to: renamed, in: rhsRaw)
+        bindings[renamed] = value
+    }
+    return .init(raw: join(lhs.raw, rhsRaw), bindings: bindings)
 }
 
 public func && (lhs: SurrealPredicate, rhs: @autoclosure () -> SurrealPredicate) -> SurrealPredicate {
-    let rhs = rhs()
-    return .init(raw: "(\(lhs.raw) AND \(rhs.raw))", bindings: merged(lhs.bindings, rhs.bindings))
+    combine(lhs, rhs()) { "(\($0) AND \($1))" }
 }
 
 public func || (lhs: SurrealPredicate, rhs: @autoclosure () -> SurrealPredicate) -> SurrealPredicate {
-    let rhs = rhs()
-    return .init(raw: "(\(lhs.raw) OR \(rhs.raw))", bindings: merged(lhs.bindings, rhs.bindings))
+    combine(lhs, rhs()) { "(\($0) OR \($1))" }
 }
 
 prefix public func ! (predicate: SurrealPredicate) -> SurrealPredicate {
@@ -121,9 +137,10 @@ private func binaryPredicate<Model, Value: SurrealPredicateValue>(
     _ rhs: Value
 ) -> SurrealPredicate {
     let name = PredicateBindingNames.next()
+    let value = rhs.surrealPredicateValue
     return .init(
-        raw: "\(SurrealQL.escapeFieldPath(lhs.name)) \(op) $\(name)",
-        bindings: [name: rhs.surrealPredicateValue]
+        raw: "\(SurrealQL.escapeFieldPath(lhs.name)) \(op) \(SurrealQL.typedParameter(name, for: value))",
+        bindings: [name: value]
     )
 }
 
