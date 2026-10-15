@@ -710,6 +710,11 @@ extension SurrealClientCore {
     func liveOf<T: Decodable & Sendable>(_ queryID: UUID, session: SessionID?, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>> {
         let liveEngine = try requireLiveEngine()
         _ = try sessionContext(for: session)
+        // One stream per query id: a second would take over the first's
+        // notifications and leave it hanging.
+        guard !liveSubscriptions.values.contains(where: { $0.serverID == queryID }) else {
+            throw SurrealError.unsupportedFeature("Live query \(queryID) already has a stream on this client.")
+        }
         let subscription = LiveSubscription(query: nil, session: session, serverID: queryID)
         return await stream(for: subscription, engine: liveEngine, as: T.self)
     }
@@ -826,7 +831,9 @@ extension SurrealClientCore {
     private static func isTransportFailure(_ error: any Error) -> Bool {
         if error is CancellationError { return true }
         switch error as? SurrealError {
-        case .connectionLost?, .timeout?, .notConnected?:
+        // Not .timeout: the socket may be fine and no reconnect will come to
+        // retry, so the stream would never hear from the query again.
+        case .connectionLost?, .notConnected?:
             return true
         default:
             return false
