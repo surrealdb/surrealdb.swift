@@ -13,6 +13,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private var reconnectTask: Task<Void, Never>?
 
     private var pending: [String: CheckedContinuation<RPCResponseEnvelope, Error>] = [:]
+    private var timers: [String: Task<Void, Never>] = [:]
     private var liveContinuations: [UUID: AsyncStream<LiveWireEvent>.Continuation] = [:]
     private var reconnectContinuation: AsyncStream<Void>.Continuation?
 
@@ -123,23 +124,74 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         }
     }
 
+    /// Sends a request and waits for its reply. Throws `SurrealError.timeout`
+    /// after `requestTimeout`, and `CancellationError` as soon as the calling
+    /// task is cancelled; either way the request is forgotten, so a late reply
+    /// is dropped.
     func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
         _ = session
         guard connected else {
             throw SurrealError.notConnected
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[request.id] = continuation
-            Task {
-                do {
-                    let payload = try codec.encode(request)
-                    try await self.rawSend(payload, requestID: request.id)
-                } catch {
-                    self.failPending(requestID: request.id, with: error)
+        let id = request.id
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                // Runs on the actor before onCancel's task can, so a request
+                // cancelled from here on is always found in `pending`.
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending[id] = continuation
+                startTimer(for: id, method: request.method)
+                Task {
+                    do {
+                        let payload = try codec.encode(request)
+                        try await self.rawSend(payload, requestID: id)
+                    } catch {
+                        self.failPending(requestID: id, with: error)
+                    }
                 }
             }
+        } onCancel: {
+            Task { await self.requestEnded(id, method: request.method, with: CancellationError()) }
         }
+    }
+
+    /// Methods that change the connection's server-side state. If one times
+    /// out or is cancelled, the server may still apply it after the client
+    /// has given up and kept its old idea of that state.
+    private static let stateChangingMethods: Set<String> = [
+        "use", "signin", "signup", "authenticate", "invalidate", "let", "unset",
+        "reset", "attach", "detach", "begin",
+    ]
+
+    private func startTimer(for id: String, method: String) {
+        let timeout = clientOptions.requestTimeout
+        guard timeout > 0, timeout.isFinite else { return }
+        timers[id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.requestEnded(id, method: method, with: SurrealError.timeout)
+        }
+    }
+
+    /// Gives up on a request that timed out or was cancelled before its reply.
+    private func requestEnded(_ id: String, method: String, with error: Error) {
+        guard pending[id] != nil else { return }
+        failPending(requestID: id, with: error)
+        // The server may still apply it. Start over on a new socket, whose
+        // state the client replays from what it knows, rather than guess.
+        if Self.stateChangingMethods.contains(method), connected {
+            handleSocketTermination(generation: generation, error: error)
+        }
+    }
+
+    /// Removes a pending request and its timer.
+    private func takePending(_ id: String) -> CheckedContinuation<RPCResponseEnvelope, Error>? {
+        timers.removeValue(forKey: id)?.cancel()
+        return pending.removeValue(forKey: id)
     }
 
     func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> {
@@ -282,12 +334,17 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func startPingLoop(generation: Int) {
         guard let socket = task else { return }
         let pingInterval = max(clientOptions.pingInterval, 1)
+        let pongTimeout = clientOptions.requestTimeout
         pingTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(pingInterval * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 do {
-                    try await Self.ping(socket)
+                    // A peer that stops answering is as dead as one that
+                    // closed the socket.
+                    try await withTimeout(seconds: pongTimeout) {
+                        try await Self.ping(socket)
+                    }
                 } catch {
                     await self?.handleSocketTermination(generation: generation, error: error)
                     return
@@ -311,7 +368,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func handleIncoming(_ data: Data) async throws {
         let response = try codec.decodeEnvelope(data)
 
-        if let id = response.id, let continuation = pending.removeValue(forKey: id) {
+        if let id = response.id, let continuation = takePending(id) {
             continuation.resume(returning: response)
             return
         }
@@ -372,7 +429,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     // MARK: - Pending requests and live streams
 
     private func failPending(requestID: String, with error: Error) {
-        guard let continuation = pending.removeValue(forKey: requestID) else {
+        guard let continuation = takePending(requestID) else {
             return
         }
         continuation.resume(throwing: error)
@@ -381,6 +438,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func failPending(with error: Error) {
         let continuations = pending.values
         pending.removeAll(keepingCapacity: false)
+        for timer in timers.values {
+            timer.cancel()
+        }
+        timers.removeAll(keepingCapacity: false)
         for continuation in continuations {
             continuation.resume(throwing: error)
         }

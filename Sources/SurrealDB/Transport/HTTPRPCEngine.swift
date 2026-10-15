@@ -49,7 +49,15 @@ actor HTTPRPCEngine: RPCEngine {
 
         urlRequest.httpBody = try codec.encode(request)
 
-        let (data, response) = try await urlSession.data(for: urlRequest)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: urlRequest)
+        } catch let error as URLError where error.code == .timedOut {
+            throw SurrealError.timeout
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw SurrealError.invalidResponse("Expected HTTPURLResponse.")
