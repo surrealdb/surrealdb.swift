@@ -16,6 +16,67 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         "\(SurrealQL.displayIdent(table)):\(idText)"
     }
 
+    /// Parses the text form the server sends record ids in over JSON
+    /// (`person:alice`, ``person:`123` ``, `person:⟨a b⟩`, `person:42`).
+    /// Integer keys become `.int`, everything else `.string`; complex keys
+    /// (arrays, objects) are kept as their text. `nil` without a `table:`.
+    public init?(parsing text: String) {
+        guard let (table, rest) = Self.splitTable(text), !rest.isEmpty else { return nil }
+        self.table = table
+        if let int = Int64(rest), rest.first != "+" {
+            self.id = .int(int)
+        } else if let unwrapped = Self.unwrap(rest) {
+            self.id = .string(unwrapped)
+        } else {
+            self.id = .string(rest)
+        }
+    }
+
+    private static func splitTable(_ text: String) -> (String, String)? {
+        if text.first == "`" || text.first == "⟨" {
+            let close: Character = text.first == "`" ? "`" : "⟩"
+            var escaped = false
+            var name = ""
+            for (offset, char) in text.dropFirst().enumerated() {
+                if escaped {
+                    name.append(char)
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == close {
+                    let rest = text.dropFirst(offset + 2)
+                    guard rest.first == ":" else { return nil }
+                    return (name, String(rest.dropFirst()))
+                } else {
+                    name.append(char)
+                }
+            }
+            return nil
+        }
+        guard let colon = text.firstIndex(of: ":") else { return nil }
+        return (String(text[..<colon]), String(text[text.index(after: colon)...]))
+    }
+
+    /// The contents of a `` `...` `` or `⟨...⟩` key, unescaped.
+    private static func unwrap(_ key: String) -> String? {
+        guard let open = key.first, let last = key.last, key.count >= 2,
+              (open == "`" && last == "`") || (open == "⟨" && last == "⟩")
+        else { return nil }
+        var result = ""
+        var escaped = false
+        for char in key.dropFirst().dropLast() {
+            if escaped {
+                result.append(char)
+                escaped = false
+            } else if char == "\\" {
+                escaped = true
+            } else {
+                result.append(char)
+            }
+        }
+        return result
+    }
+
     private var idText: String {
         switch id {
         case .string(let value):

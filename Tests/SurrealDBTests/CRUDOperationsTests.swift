@@ -19,6 +19,12 @@ private struct Item: SurrealModel, Codable, Sendable, Equatable {
     }
 }
 
+/// A partial update: only the fields to change.
+private struct ItemChanges: Encodable, Sendable {
+    var name: String?
+    var qty: Int?
+}
+
 private struct Link: SurrealModel, Codable, Sendable {
     static let surrealTable = "link"
     var id: SurrealRecordID?
@@ -72,6 +78,16 @@ func integration_insertMergePatchRelateAndRanges() async throws {
         // merge: only the given fields change.
         let merged = try await client.merge(recordID: item(1), with: ["qty": SurrealValue.int(10)], as: Item.self)
         #expect(merged == Item(id: item(1), name: "i1", qty: 10))
+        // A nil optional is left out and keeps the field; .null clears it.
+        let partial = try await client.merge(recordID: item(1), with: ItemChanges(name: nil, qty: 11), as: Item.self)
+        #expect(partial == Item(id: item(1), name: "i1", qty: 11))
+        let cleared = try await client.merge(recordID: item(1), with: ["name": SurrealValue.null], as: SurrealValue.self)
+        if case .object(let fields)? = cleared {
+            #expect(fields["name"] == .null)
+        } else {
+            Issue.record("Expected the merged record, got \(String(describing: cleared))")
+        }
+        _ = try await client.merge(recordID: item(1), with: ["name": "i1"], as: Item.self)
         let byPredicate = try await client.merge(Item.self, with: ["qty": SurrealValue.int(0)], where: Item.Fields.name == "i2")
         #expect(byPredicate.map(\.qty) == [0])
         #expect(try await client.select(recordID: item(3), as: Item.self)?.qty == 3)

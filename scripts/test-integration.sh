@@ -5,7 +5,13 @@ export SURREALDB_RUN_INTEGRATION=1
 
 SURREAL_PID=""
 START_MODE=""
-INTEGRATION_MODE="${SURREALDB_INTEGRATION_MODE:-auto}"
+# A binary given in SURREALDB_BIN means "test this one": run it locally
+# rather than letting auto mode pick Docker.
+if [[ -n "${SURREALDB_BIN:-}" ]]; then
+  INTEGRATION_MODE="${SURREALDB_INTEGRATION_MODE:-local}"
+else
+  INTEGRATION_MODE="${SURREALDB_INTEGRATION_MODE:-auto}"
+fi
 SURREALDB_BIND_HOST="${SURREALDB_BIND_HOST:-127.0.0.1}"
 SURREALDB_PORT="${SURREALDB_PORT:-8000}"
 

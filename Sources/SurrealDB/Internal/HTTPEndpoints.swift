@@ -25,7 +25,8 @@ struct HTTPEndpoints: Sendable {
 
     /// Runs a SurrealQL dump (`POST /import`). The server answers 2xx when
     /// every statement applied, and 422 with the failed statements when some
-    /// didn't; those still leave the rest of the import in place.
+    /// didn't; those still leave the rest of the import in place. Servers
+    /// before 3.3.1 answer 200 either way, with any failures in the body.
     func importSQL(_ sql: String, session: SessionContext) async throws {
         let (data, status) = try await send(
             "import",
@@ -37,7 +38,17 @@ struct HTTPEndpoints: Sendable {
         )
         switch status {
         case 200..<300:
-            return
+            guard !data.isEmpty,
+                  let rows = try? RPCWire.decodeQueryResults(from: CBORSurrealCodec.decodeValue(data))
+            else {
+                return
+            }
+            let failed = rows.enumerated().filter { $0.element.status == .err }
+            if !failed.isEmpty {
+                throw SurrealError.importFailed(failed.map { index, row in
+                    QueryErrorDetail(index: index, message: row.errorMessage, kind: row.kind, details: row.details)
+                })
+            }
         case 422:
             let failed = try RPCWire.decodeQueryResults(from: CBORSurrealCodec.decodeValue(data))
             throw SurrealError.importFailed(failed.enumerated().map { index, row in

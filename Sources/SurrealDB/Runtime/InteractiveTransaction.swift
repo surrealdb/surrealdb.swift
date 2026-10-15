@@ -138,7 +138,8 @@ public struct SurrealInteractiveTransaction: Sendable {
 
     /// Merges `data` into a record, leaving fields it doesn't mention alone.
     /// `data` is usually a dictionary or a type with just the fields to
-    /// change: a `nil` optional would set that field to `NULL`.
+    /// change. A `nil` optional property is left out, so that field keeps
+    /// its value; to clear a field, pass `SurrealValue.null` for it.
     public func merge<Model: Decodable & Sendable>(
         recordID: SurrealRecordID,
         with data: some Encodable & Sendable,
@@ -243,7 +244,11 @@ extension SurrealClientCore {
         do {
             result = try await body(transaction)
         } catch {
-            try? await transaction.cancel()
+            // If `body` threw because this task was cancelled, a cancel sent
+            // from here would be refused before it left the client, leaving
+            // the transaction open on the server. Send it from a task of its
+            // own.
+            await Task.detached { try? await transaction.cancel() }.value
             throw error
         }
         try await transaction.commit()
