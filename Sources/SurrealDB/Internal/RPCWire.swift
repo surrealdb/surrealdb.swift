@@ -14,6 +14,16 @@ struct RPCResponseEnvelope: Sendable {
     let action: String?
     let result: SurrealValue?
     let error: RPCErrorObject?
+    /// The affected record, on a live notification sent at the top level.
+    let record: SurrealValue?
+
+    init(id: String?, action: String?, result: SurrealValue?, error: RPCErrorObject?, record: SurrealValue? = nil) {
+        self.id = id
+        self.action = action
+        self.result = result
+        self.error = error
+        self.record = record
+    }
 }
 
 public struct RPCErrorCause: Sendable, Codable {
@@ -43,6 +53,17 @@ public struct RPCErrorObject: Sendable, Codable {
         self.message = message
         self.details = details
         self.cause = cause
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        code = try container.decodeIfPresent(Int.self, forKey: .code)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind)
+        message = try container.decode(String.self, forKey: .message)
+        details = try container.decodeIfPresent(SurrealValue.self, forKey: .details)
+        // As over CBOR: a string or null cause mustn't fail the whole error.
+        cause = try container.decodeIfPresent(SurrealValue.self, forKey: .cause)
+            .flatMap(CBORSurrealCodec.decodeRPCCause(from:))
     }
 }
 
@@ -108,7 +129,7 @@ enum CBORSurrealCodec {
             error = try decodeRPCError(from: rawError)
         }
 
-        return RPCResponseEnvelope(id: id, action: action, result: result, error: error)
+        return RPCResponseEnvelope(id: id, action: action, result: result, error: error, record: try map.decoded("record"))
     }
 
     static func toCBOR(_ value: SurrealValue) -> CBOR {

@@ -216,14 +216,28 @@ func integration_exportThenImportIntoAnotherDatabase() async throws {
     }
 }
 
-/// Answers `version` with whatever it's set to.
+/// Answers `version` with whatever it's set to, optionally only once released.
 private actor SettableVersionEngine: RPCEngine {
     var version: SurrealValue = .string("surrealdb-3.3.4")
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private(set) var asked = false
+
     func setVersion(_ value: SurrealValue) { version = value }
+    func hold() { holding = true }
+    func release() {
+        holding = false
+        held.forEach { $0.resume() }
+        held = []
+    }
     func connect() async throws {}
     func close() async {}
     func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
-        RPCResponseEnvelope(id: request.id, action: nil, result: request.method == "version" ? version : .null, error: nil)
+        if request.method == "version" {
+            asked = true
+            if holding { await withCheckedContinuation { held.append($0) } }
+        }
+        return RPCResponseEnvelope(id: request.id, action: nil, result: request.method == "version" ? version : .null, error: nil)
     }
 }
 
@@ -241,5 +255,27 @@ func importExport_failedReconnectLeavesTheClientDisconnected() async throws {
     do {
         try await core.importSQL("OPTION IMPORT;", session: nil)
         Issue.record("Expected notConnected after a failed connect()")
+    } catch SurrealError.notConnected {}
+}
+
+@Test
+func importExport_closeDuringConnectLeavesTheClientDisconnected() async throws {
+    let engine = SettableVersionEngine()
+    let core = SurrealClientCore(
+        engine: engine,
+        http: HTTPEndpoints(rpcURL: URL(string: "http://127.0.0.1:1/rpc")!, timeout: 1),
+        checkServerVersion: true
+    )
+    await engine.hold()
+    let connecting = Task { try await core.connect() }
+    #expect(await eventually { await engine.asked })
+
+    // The version reply lands after close(): it mustn't reopen the client.
+    await core.close()
+    await engine.release()
+    await #expect(throws: SurrealError.self) { try await connecting.value }
+    do {
+        try await core.importSQL("OPTION IMPORT;", session: nil)
+        Issue.record("Expected notConnected after close()")
     } catch SurrealError.notConnected {}
 }

@@ -165,16 +165,16 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
                 }
             }
         } onCancel: {
-            Task { await self.failPending(requestID: id, with: CancellationError()) }
+            Task { await self.requestEnded(id, method: request.method, with: CancellationError()) }
         }
     }
 
     /// Methods that change the connection's server-side state. If one times
-    /// out, the server may still apply it after the client has given up and
-    /// kept its old idea of that state.
-    private static let stateChangingMethods: Set<String> = [
+    /// out or is cancelled, the server may still apply it after the client
+    /// has given up and kept its old idea of that state.
+    static let stateChangingMethods: Set<String> = [
         "use", "signin", "signup", "authenticate", "invalidate", "let", "unset",
-        "reset", "attach", "detach", "begin",
+        "reset", "attach", "detach", "begin", "refresh",
     ]
 
     private func startTimer(for id: String, method: String) {
@@ -183,17 +183,18 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         timers[id] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            await self?.requestTimedOut(id, method: method)
+            await self?.requestEnded(id, method: method, with: SurrealError.timeout)
         }
     }
 
-    private func requestTimedOut(_ id: String, method: String) {
+    /// Gives up on a request that timed out or was cancelled before its reply.
+    private func requestEnded(_ id: String, method: String, with error: Error) {
         guard pending[id] != nil else { return }
-        failPending(requestID: id, with: SurrealError.timeout)
-        // Start over on a new socket, whose state the client replays from
-        // what it knows, rather than guess whether this one applied.
+        failPending(requestID: id, with: error)
+        // The server may still apply it. Start over on a new socket, whose
+        // state the client replays from what it knows, rather than guess.
         if Self.stateChangingMethods.contains(method), connected {
-            handleSocketTermination(generation: generation, error: SurrealError.timeout)
+            handleSocketTermination(generation: generation, error: error)
         }
     }
 
@@ -435,10 +436,14 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         } catch {
             // A reply that won't decode (say, a malformed tag in its result)
             // fails its own request; the connection is fine.
-            if let id = codec.requestID(in: data)?.lowercased(), let continuation = takePending(id) {
-                continuation.resume(throwing: error as? SurrealError ?? SurrealError.invalidResponse("Couldn't decode the reply: \(error)"))
+            if let id = codec.requestID(in: data)?.lowercased() {
+                takePending(id)?.resume(throwing: error as? SurrealError ?? SurrealError.invalidResponse("Couldn't decode the reply: \(error)"))
+                return
             }
-            return
+            // A message that can't be matched to anything might have been any
+            // reply or notification: treat the connection as broken rather
+            // than leave its request waiting.
+            throw error
         }
 
         if let id = response.id?.lowercased(), let continuation = takePending(id) {
