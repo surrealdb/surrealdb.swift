@@ -68,7 +68,14 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         closedByClient = false
         reconnectTask?.cancel()
         reconnectTask = nil
-        let connecting = Task { try await self.establishSocket() }
+        let connecting = Task {
+            do {
+                try await self.establishSocket()
+            } catch {
+                await self.connectAttemptFailed()
+                throw error
+            }
+        }
         pendingConnect = connecting
         defer {
             // close() may have dropped this attempt and a newer connect()
@@ -93,6 +100,13 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             Task { await self.connectCallerCancelled(caller, attempt) }
         }
         try Task.checkCancellation()
+    }
+
+    /// This attempt replaced any automatic reconnect, so if it fails nothing
+    /// will feed the live streams kept open across an earlier drop.
+    private func connectAttemptFailed() {
+        guard !connected, !closedByClient, reconnectTask == nil else { return }
+        finishAllLiveStreams()
     }
 
     private func connectCallerCancelled(_ caller: UUID, _ attempt: Task<Void, Error>) {
