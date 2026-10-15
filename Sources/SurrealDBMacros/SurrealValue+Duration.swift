@@ -67,8 +67,9 @@ enum DurationText {
             }
 
             nanos += extraNanos
-            let (sum, overflow) = seconds.addingReportingOverflow(wholeSeconds + nanos / nanosPerSecond)
-            guard !overflow else { return nil }
+            let (carried, carryOverflow) = wholeSeconds.addingReportingOverflow(nanos / nanosPerSecond)
+            let (sum, overflow) = seconds.addingReportingOverflow(carried)
+            guard !carryOverflow, !overflow else { return nil }
             seconds = sum
             nanos %= nanosPerSecond
         }
@@ -78,8 +79,12 @@ enum DurationText {
 
     /// The server's canonical form: largest unit first, zero parts left out,
     /// and `"0ns"` for zero.
+    /// Nanoseconds of a second or more carry into the seconds; if that would
+    /// overflow, they're written out as sub-second units instead, so the
+    /// text still holds the exact value.
     static func format(seconds: UInt64, nanoseconds: UInt32) -> String {
-        var remaining = seconds + UInt64(nanoseconds) / nanosPerSecond
+        let (carried, overflow) = seconds.addingReportingOverflow(UInt64(nanoseconds) / nanosPerSecond)
+        var remaining = overflow ? seconds : carried
         var parts = ""
 
         let secondUnits: [(String, UInt64)] = [
@@ -94,7 +99,7 @@ enum DurationText {
             }
         }
 
-        var subsecond = UInt64(nanoseconds) % nanosPerSecond
+        var subsecond = overflow ? UInt64(nanoseconds) : UInt64(nanoseconds) % nanosPerSecond
         for (suffix, divisor) in [("ms", UInt64(1_000_000)), ("µs", 1_000), ("ns", 1)] {
             let count = subsecond / divisor
             if count > 0 {
