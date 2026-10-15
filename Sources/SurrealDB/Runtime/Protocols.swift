@@ -60,15 +60,17 @@ public protocol SurrealQueryable: Sendable {
         content: Model
     ) async throws -> [Model]
 
-    /// Replaces the content of every record matching `predicate`. To
-    /// replace every record in the table, call `upsertAll` instead.
+    /// Replaces the content of every record matching `predicate`, or creates
+    /// a record if none match. To replace every record in the table, call
+    /// `upsertAll` instead.
     func upsert<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
         where predicate: SurrealPredicate
     ) async throws -> [Model]
 
-    /// Replaces the content of every record in the table.
+    /// Replaces the content of every record in the table, or creates a
+    /// record if the table is empty.
     func upsertAll<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model

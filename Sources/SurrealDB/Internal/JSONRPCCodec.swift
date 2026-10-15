@@ -14,6 +14,7 @@ enum JSONRPCCodec {
         let action: String?
         let result: SurrealValue?
         let error: RPCErrorObject?
+        let record: SurrealValue?
     }
 
     static func encode(_ request: RPCRequest) throws -> Data {
@@ -40,7 +41,8 @@ enum JSONRPCCodec {
             id: wire.id,
             action: wire.action,
             result: wire.result,
-            error: wire.error
+            error: wire.error,
+            record: wire.record
         )
     }
 }
