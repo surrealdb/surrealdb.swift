@@ -30,13 +30,18 @@ actor SurrealClientCore {
     func connect() async throws {
         try await engine.connect()
 
-        if checkServerVersion {
-            do {
+        do {
+            if checkServerVersion {
                 try ServerVersion.check(try await version())
-            } catch {
-                await engine.close()
-                throw error
             }
+            if serverKeepsState {
+                // A SessionContext passed at init only exists locally until
+                // it's applied to the new connection.
+                try await apply(session: nil, context: rootSession)
+            }
+        } catch {
+            await engine.close()
+            throw error
         }
 
         guard let liveEngine = engine as? any LiveRPCEngine else {
@@ -169,7 +174,7 @@ actor SurrealClientCore {
     /// isn't registered in `sessions` yet at attach time (and during
     /// reconnect replay, re-attaching must not depend on lookup state).
     private func sendAttach(_ id: SessionID) async throws {
-        let request = RPCRequest(id: UUID().uuidString, method: "attach", params: nil, session: id.rawValue.uuidString, txn: nil)
+        let request = RPCRequest(id: UUID().uuidString.lowercased(), method: "attach", params: nil, session: id.rawValue.uuidString, txn: nil)
         let envelope = try await engine.send(request, session: rootSession)
         if let error = envelope.error {
             throw SurrealError.serverError(error)
@@ -201,21 +206,34 @@ actor SurrealClientCore {
     /// skips the local context mutation the public `use`/`authenticate` do —
     /// the stored context already holds exactly the values being replayed.
     private func replay(session: SessionID?, context: SessionContext) async {
+        try? await apply(session: session, context: context, stopOnError: false)
+    }
+
+    /// Sends a session's namespace, database, token and variables to the
+    /// server. Throws on the first failure unless `stopOnError` is false, as
+    /// for a reconnect, where one failed step shouldn't skip the rest.
+    private func apply(session: SessionID?, context: SessionContext, stopOnError: Bool = true) async throws {
+        func step(_ method: String, _ params: [SurrealValue]) async throws {
+            do {
+                _ = try await performRPC(method, params: params, session: session)
+            } catch where !stopOnError {
+                return
+            }
+        }
         if context.namespace != nil || context.database != nil {
-            _ = try? await performRPC(
+            try await step(
                 "use",
-                params: [
+                [
                     context.namespace.map(SurrealValue.string) ?? .none,
                     context.database.map(SurrealValue.string) ?? .none,
-                ],
-                session: session
+                ]
             )
         }
         if let token = context.accessToken {
-            _ = try? await performRPC("authenticate", params: [.string(token)], session: session)
+            try await step("authenticate", [.string(token)])
         }
         for (name, value) in context.variables {
-            _ = try? await performRPC("let", params: [.string(name), value], session: session)
+            try await step("let", [.string(name), value])
         }
     }
 
@@ -321,12 +339,10 @@ actor SurrealClientCore {
         guard tokens.refresh != nil else {
             throw SurrealError.invalidCredentials("refresh() needs a refresh token; sign in with an access method that issues one.")
         }
-        if !serverKeepsState {
-            // Over HTTP the stored access token goes out as a Bearer header,
-            // and the server rejects an expired one before reading the body.
-            setSessionContext(for: session) { $0.accessToken = nil }
-        }
-        let response = try await rpc("refresh", params: [tokens.surrealValue], session: session)
+        // Over HTTP the stored access token goes out as a Bearer header, and
+        // the server rejects an expired one before reading the body. Leave it
+        // off this request without forgetting it, in case refresh fails.
+        let response = try await rpc("refresh", params: [tokens.surrealValue], session: session, anonymous: true)
         let refreshed = try parseAuthTokens(response)
         setSessionContext(for: session) { $0.accessToken = refreshed.access }
         return refreshed
@@ -337,7 +353,8 @@ actor SurrealClientCore {
         guard tokens.refresh != nil else {
             throw SurrealError.invalidCredentials("revoke() needs a refresh token.")
         }
-        _ = try await rpc("revoke", params: [tokens.surrealValue], session: session)
+        // As for refresh: an expired access token must not block revoking.
+        _ = try await rpc("revoke", params: [tokens.surrealValue], session: session, anonymous: true)
     }
 
     /// Authenticates with a token pair. If the access token has expired and
@@ -465,7 +482,9 @@ actor SurrealClientCore {
         txn: UUID? = nil
     ) async throws -> [Model] {
         let payload = try SurrealValue.fromEncodable(content)
-        let query = SurrealDSL.upsert(model, where: predicate, bindings: ["content": payload])
+        // A table-wide UPSERT with no WHERE inserts one new record rather
+        // than touching the existing ones; `WHERE true` updates them all.
+        let query = SurrealDSL.upsert(model, where: predicate ?? SurrealPredicate(raw: "true"), bindings: ["content": payload])
         return try await self.query(query, session: session, txn: txn)
     }
 
@@ -551,22 +570,27 @@ actor SurrealClientCore {
         _ = try await rpc("kill", params: [.uuid(liveQueryID)], session: session)
     }
 
-    func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil) async throws -> SurrealValue {
+    func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil, anonymous: Bool = false) async throws -> SurrealValue {
         if let activeReplay {
             await activeReplay.value
         }
 
-        return try await performRPC(method, params: params, session: session, txn: txn)
+        return try await performRPC(method, params: params, session: session, txn: txn, anonymous: anonymous)
     }
 
     /// Ungated variant of `rpc`. The reconnect-replay path must use this
     /// directly: its own `use`/`authenticate` calls would otherwise hit the
     /// `activeReplay` gate above and await the replay task from within the
     /// replay task — deadlocking the whole client.
-    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil) async throws -> SurrealValue {
-        let context = try sessionContext(for: session)
+    /// `anonymous` leaves the stored access token off this one request (the
+    /// HTTP engine sends it as a Bearer header).
+    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil, anonymous: Bool = false) async throws -> SurrealValue {
+        var context = try sessionContext(for: session)
+        if anonymous {
+            context.accessToken = nil
+        }
         let request = RPCRequest(
-            id: UUID().uuidString,
+            id: UUID().uuidString.lowercased(),
             method: method,
             params: params,
             session: session?.rawValue.uuidString,
@@ -659,8 +683,14 @@ extension SurrealClientCore {
                 for await event in wireStream {
                     let decoded = event.action == .killed ? nil : try? event.payload.decode(T.self)
                     var record: SurrealRecordID?
-                    if case .recordID(let id)? = event.record {
+                    switch event.record {
+                    case .recordID(let id)?:
                         record = id
+                    case .string(let text)?:
+                        // The JSON wire format sends record ids as text.
+                        record = SurrealRecordID(parsing: text)
+                    default:
+                        break
                     }
                     continuation.yield(
                         LiveEvent(

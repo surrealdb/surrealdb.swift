@@ -1038,7 +1038,7 @@ Integration environment variables:
 | `SURREALDB_PASSWORD` | _(unset)_ | If unset, sign-in is skipped. |
 | `SURREALDB_AUTH_LEVEL` | `root` | One of `root`, `namespace` / `ns`, `database` / `db`. |
 
-`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to choose the `surreal` binary, or `SURREALDB_IMAGE_TAG` for the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build.
+`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to test a particular `surreal` binary (this runs it locally even when Docker is available), or `SURREALDB_IMAGE_TAG` to choose the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build.
 
 ---
 

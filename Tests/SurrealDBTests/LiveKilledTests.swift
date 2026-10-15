@@ -71,3 +71,37 @@ func integration_liveStreamDeliversKilledAndFinishes() async throws {
     #expect(events.last?.action == .killed)
     #expect(events.last?.recordID == "")
 }
+
+@Test
+func recordID_parsesTheServersTextForm() {
+    #expect(SurrealRecordID(parsing: "person:alice") == SurrealRecordID(table: "person", id: .string("alice")))
+    #expect(SurrealRecordID(parsing: "person:42") == SurrealRecordID(table: "person", id: .int(42)))
+    #expect(SurrealRecordID(parsing: "person:`123`") == SurrealRecordID(table: "person", id: .string("123")))
+    #expect(SurrealRecordID(parsing: "person:⟨a b⟩") == SurrealRecordID(table: "person", id: .string("a b")))
+    #expect(SurrealRecordID(parsing: "`we:ird`:x") == SurrealRecordID(table: "we:ird", id: .string("x")))
+    #expect(SurrealRecordID(parsing: "nocolon") == nil)
+    // Round-trips what rawValue renders.
+    for id in [SurrealRecordID(table: "t", id: .string("a b")), SurrealRecordID(table: "t", id: .int(-5)), SurrealRecordID(table: "t", id: .string("007"))] {
+        #expect(SurrealRecordID(parsing: id.rawValue) == id)
+    }
+}
+
+@Test
+func integration_liveEventRecordOverJSON() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let client = try SurrealClient(endpoint: wsEndpoint(), wireProtocol: .json)
+    try await client.connect()
+    defer { Task { await client.close() } }
+    try await authenticateIfNeeded(client)
+    try await client.use(namespace: IntegrationEnv.namespace, database: "t_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))
+    _ = try await client.queryRaw("DEFINE TABLE watched SCHEMALESS;")
+
+    let stream = try await client.live(SurrealDSL.live(Watched.self))
+    _ = try await client.queryRaw("CREATE watched:j SET name = 'json';")
+    let event = try await awaitTaskValue(Task { () -> LiveEvent<Watched>? in
+        for await event in stream { return event }
+        return nil
+    }, timeoutSeconds: 10, timeoutMessage: "No live event over JSON.")
+    #expect(event?.record == SurrealRecordID(table: "watched", id: .string("j")))
+}
