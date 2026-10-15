@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `SurrealQL.escapeIdent(_:)`, `SurrealQL.escapeFieldPath(_:)` and `SurrealQL.quote(_:)` for callers writing their own SurrealQL.
 
 ### Fixed
+- Typed decoding and encoding lost data by going through JSON: record ids became strings, `Date` and `UUID` were written as strings, datetimes lost their fractional seconds, and bytes became base64 text. `SurrealValue.decode(_:)` and `SurrealValue.fromEncodable(_:)` now convert directly, keeping `Date`, `UUID`, `Data`, `Decimal`, `SurrealRecordID` and `SurrealValue` fields as SurrealDB types. Record ids, UUIDs, durations and datetimes still decode into `String` fields as their text form. The JSON-based variants that take a `JSONDecoder`/`JSONEncoder` remain, deprecated.
+- Datetimes before 1970 were clamped to the epoch when sent. They're now sent as floored seconds plus forward-counting nanoseconds, as the server does, and malformed datetime tags throw instead of decoding to `NULL`.
 - Durations decoded as `""`. The server sends tag 14 as `[seconds, nanoseconds]`, and the SDK only read a string; it now decodes that form into the server's canonical text (`1h30m`), and sends `.duration` values in the same form. Malformed duration tags now throw instead of decoding to an empty string. New `SurrealValue.duration(seconds:nanoseconds:)` and `durationComponents` convert between the two.
 
 ## [1.0.0]

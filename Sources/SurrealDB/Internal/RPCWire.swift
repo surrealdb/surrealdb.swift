@@ -74,6 +74,7 @@ enum CBORSurrealCodec {
         map[.utf8String("method")] = .utf8String(request.method)
 
         if let params = request.params {
+            try params.forEach(checkDates)
             map[.utf8String("params")] = .array(params.map(toCBOR(_:)))
         }
         if let session = request.session {
@@ -124,11 +125,13 @@ enum CBORSurrealCodec {
         case .bytes(let value):
             return .byteString(value)
         case .datetime(let value):
-            let seconds = Int64(value.timeIntervalSince1970)
-            let nanos = Int64((value.timeIntervalSince1970 - Double(seconds)) * 1_000_000_000)
+            // [seconds: i64, nanoseconds: u32]. Seconds are floored so the
+            // nanoseconds always count forwards, which keeps dates before
+            // 1970 intact (they used to be clamped to the epoch).
+            let (seconds, nanos) = datetimeComponents(value)
             return .tagged(tagCustomDatetime, .array([
-                .unsignedInt(UInt64(max(0, seconds))),
-                .unsignedInt(UInt64(max(0, nanos))),
+                cborInteger(seconds),
+                .unsignedInt(UInt64(nanos)),
             ]))
         case .uuid(let value):
             return .tagged(.uuid, .byteString(withUnsafeBytes(of: value.uuid) { Data($0) }))
@@ -264,10 +267,8 @@ enum CBORSurrealCodec {
     private static func decodeTagged(tag: CBOR.Tag, value: CBOR) throws -> SurrealValue {
         switch tag {
         case .iso8601DateTime:
-            guard case .utf8String(let raw) = value,
-                  let date = ISO8601DateFormatter().date(from: raw)
-            else {
-                return .null
+            guard case .utf8String(let raw) = value, let date = SurrealValue.parseISO8601(raw) else {
+                throw SurrealError.invalidResponse("Expected an RFC 3339 string for a datetime (tag 0).")
             }
             return .datetime(date)
         case .uuid:
@@ -325,13 +326,13 @@ enum CBORSurrealCodec {
             }
             return .duration(seconds: seconds, nanoseconds: nanos)
         case tagCustomDatetime:
-            if case .array(let parts) = value, parts.count == 2 {
-                let sec = parts[0].integerValue() ?? 0
-                let nsec = parts[1].integerValue() ?? 0
-                let date = Date(timeIntervalSince1970: Double(sec) + (Double(nsec) / 1_000_000_000))
-                return .datetime(date)
+            guard case .array(let parts) = value, parts.count == 2,
+                  let seconds: Int64 = exactInteger(parts[0]),
+                  let nanos: UInt32 = exactInteger(parts[1]), nanos < 1_000_000_000
+            else {
+                throw SurrealError.invalidResponse("Expected [seconds, nanoseconds] for a datetime (tag 12).")
             }
-            return .null
+            return .datetime(date(seconds: seconds, nanoseconds: nanos))
         case tagRange:
             if case .array(let bounds) = value, bounds.count == 2 {
                 let begin = try decodeBound(from: bounds[0])
@@ -438,6 +439,67 @@ enum CBORSurrealCodec {
             return []
         }
         return values.map(doubleArray3(from:))
+    }
+
+    private static let unixToReferenceDate: Int64 = 978_307_200
+
+    /// Whether tag 12 can carry `date`: its whole seconds since 1970 must
+    /// fit an `Int64` (with room for the 1970/2001 offset).
+    static func canEncode(_ date: Date) -> Bool {
+        let seconds = date.timeIntervalSinceReferenceDate
+        return seconds.isFinite && seconds > -9.2e18 && seconds < 9.2e18
+    }
+
+    /// Throws for a datetime anywhere in `value` that tag 12 can't carry.
+    static func checkDates(_ value: SurrealValue) throws {
+        switch value {
+        case .datetime(let date) where !canEncode(date):
+            throw EncodingError.invalidValue(date, .init(codingPath: [], debugDescription: "\(date) is out of range for a SurrealDB datetime."))
+        case .array(let values), .set(let values):
+            try values.forEach(checkDates)
+        case .object(let fields):
+            try fields.values.forEach(checkDates)
+        case .recordID(let id):
+            try checkDates(id.id)
+        case .range(let range):
+            for bound in [range.begin, range.end] {
+                if case .included(let value) = bound { try checkDates(value) }
+                if case .excluded(let value) = bound { try checkDates(value) }
+            }
+        default:
+            break
+        }
+    }
+
+    /// Splits a date into whole seconds since 1970 (floored) and nanoseconds.
+    /// Works relative to 2001, where `Date` keeps its value, to lose as little
+    /// precision as possible. Dates `canEncode` rejects are clamped, so this
+    /// never traps; `encode` refuses them before getting here.
+    static func datetimeComponents(_ date: Date) -> (seconds: Int64, nanoseconds: UInt32) {
+        guard canEncode(date) else {
+            return (date.timeIntervalSinceReferenceDate > 0 ? .max : .min, 0)
+        }
+        let sinceReference = date.timeIntervalSinceReferenceDate
+        let whole = sinceReference.rounded(.down)
+        var nanos = Int64(((sinceReference - whole) * 1_000_000_000).rounded())
+        var seconds = Int64(whole) + unixToReferenceDate
+        if nanos >= 1_000_000_000 {
+            seconds += 1
+            nanos -= 1_000_000_000
+        }
+        return (seconds, UInt32(nanos))
+    }
+
+    static func date(seconds: Int64, nanoseconds: UInt32) -> Date {
+        // Seconds near Int64.min would overflow the subtraction; that far out
+        // a Double can't tell the difference anyway.
+        let (sinceReference, overflow) = seconds.subtractingReportingOverflow(unixToReferenceDate)
+        let whole = overflow ? Double(seconds) - Double(unixToReferenceDate) : Double(sinceReference)
+        return Date(timeIntervalSinceReferenceDate: whole + Double(nanoseconds) / 1_000_000_000)
+    }
+
+    static func cborInteger(_ value: Int64) -> CBOR {
+        value >= 0 ? .unsignedInt(UInt64(value)) : .negativeInt(UInt64(bitPattern: ~value))
     }
 
     /// PotentCBOR's `integerValue()` traps when the value doesn't fit `T`.

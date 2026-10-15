@@ -131,7 +131,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .bytes(let value):
             try container.encode(value.base64EncodedString())
         case .datetime(let value):
-            try container.encode(ISO8601DateFormatter().string(from: value))
+            try container.encode(SurrealValue.iso8601Fractional(value))
         case .uuid(let value):
             try container.encode(value.uuidString)
         case .decimal(let value):
@@ -153,18 +153,6 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .object(let value):
             try container.encode(value)
         }
-    }
-
-    public static func fromEncodable<T: Encodable>(_ value: T, encoder: JSONEncoder = .surrealDefault) throws -> SurrealValue {
-        let data = try encoder.encode(value)
-        let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-        return try SurrealValue(jsonObject: object)
-    }
-
-    public func decode<T: Decodable>(_ type: T.Type, decoder: JSONDecoder = .surrealDefault) throws -> T {
-        let object = try jsonObject()
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed])
-        return try decoder.decode(T.self, from: data)
     }
 
     public init(jsonObject: Any) throws {
@@ -213,7 +201,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .bytes(let value):
             return value.base64EncodedString()
         case .datetime(let value):
-            return ISO8601DateFormatter().string(from: value)
+            return SurrealValue.iso8601Fractional(value)
         case .uuid(let value):
             return value.uuidString
         case .decimal(let value):
@@ -289,7 +277,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         }
     }
 
-    static func iso8601Fractional(_ date: Date) -> String {
+    package static func iso8601Fractional(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: date)
