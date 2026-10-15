@@ -1,0 +1,84 @@
+import Foundation
+import Testing
+@testable import SurrealDB
+
+private func stalledClient(_ scheme: String, proxy: TCPProxy, timeout: TimeInterval) async throws -> SurrealClient {
+    let client = try SurrealClient(
+        endpoint: "\(scheme)://127.0.0.1:\(proxy.port)",
+        options: .init(requestTimeout: timeout, pingInterval: 60),
+        websocketOptions: .init(reconnectEnabled: false)
+    )
+    try await client.connect()
+    try await authenticateIfNeeded(client)
+    try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
+    return client
+}
+
+@Test
+func integration_requestsTimeOutWhenTheServerStopsAnswering() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    for scheme in ["ws", "http"] {
+        let proxy = TCPProxy(upstream: IntegrationEnv.host)
+        try await proxy.start()
+        defer { proxy.shutdown() }
+
+        let client = try await stalledClient(scheme, proxy: proxy, timeout: 0.5)
+        defer { Task { await client.close() } }
+
+        proxy.setStalled(true)
+        let started = Date()
+        // This used to wait forever on WebSocket.
+        await #expect {
+            _ = try await client.queryRaw("RETURN 1;")
+        } throws: { error in
+            if case SurrealError.timeout = error { return true }
+            return false
+        }
+        #expect(Date().timeIntervalSince(started) < 5, "\(scheme) took too long to time out")
+    }
+}
+
+@Test
+func integration_cancellingAQueryReturnsPromptly() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+
+    let client = try await stalledClient("ws", proxy: proxy, timeout: 60)
+    defer { Task { await client.close() } }
+
+    proxy.setStalled(true)
+    let query = Task { try await client.queryRaw("RETURN 1;") }
+    try await Task.sleep(nanoseconds: 200_000_000)
+
+    let started = Date()
+    query.cancel()
+    await #expect(throws: CancellationError.self) {
+        _ = try await query.value
+    }
+    #expect(Date().timeIntervalSince(started) < 2)
+}
+
+@Test
+func integration_wsConnectTimesOutAgainstASilentHost() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+    proxy.setStalled(true)
+
+    let client = try SurrealClient(
+        endpoint: "ws://127.0.0.1:\(proxy.port)",
+        options: .init(requestTimeout: 0.5),
+        websocketOptions: .init(reconnectEnabled: false)
+    )
+    let started = Date()
+    await #expect(throws: SurrealError.self) {
+        try await client.connect()
+    }
+    #expect(Date().timeIntervalSince(started) < 5)
+}
