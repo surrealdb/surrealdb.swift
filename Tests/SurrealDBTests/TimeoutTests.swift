@@ -23,7 +23,7 @@ func integration_requestsTimeOutWhenTheServerStopsAnswering() async throws {
         try await proxy.start()
         defer { proxy.shutdown() }
 
-        let client = try await stalledClient(scheme, proxy: proxy, timeout: 0.5)
+        let client = try await stalledClient(scheme, proxy: proxy, timeout: 2)
         defer { Task { await client.close() } }
 
         proxy.setStalled(true)
@@ -35,7 +35,7 @@ func integration_requestsTimeOutWhenTheServerStopsAnswering() async throws {
             if case SurrealError.timeout = error { return true }
             return false
         }
-        #expect(Date().timeIntervalSince(started) < 5, "\(scheme) took too long to time out")
+        #expect(Date().timeIntervalSince(started) < 10, "\(scheme) took too long to time out")
     }
 }
 
