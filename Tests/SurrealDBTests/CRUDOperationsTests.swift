@@ -155,6 +155,14 @@ func integration_mergePatchRelateTargetRecordsOverJSON() async throws {
     // A predicate binding named like the SDK's own keeps its value.
     let none = try await client.merge(Item.self, with: ["qty": SurrealValue.int(0)], where: SurrealPredicate(raw: "$_sdk_data", bindings: ["_sdk_data": .bool(false)]))
     #expect(none.isEmpty)
+    // Even when it also binds the name the SDK would rename it to.
+    let probe = try #require((SurrealField<Item, Int>("qty") == 1).bindings.keys.first)
+    let next = "_pv\(UInt64(probe.dropFirst(3))! + 1)"
+    let stillNone = try await client.merge(Item.self, with: ["qty": SurrealValue.int(0)], where: SurrealPredicate(
+        raw: "$_sdk_data OR !$\(next)",
+        bindings: ["_sdk_data": .bool(false), next: .bool(true)]
+    ))
+    #expect(stillNone.isEmpty)
 
     let qty = try await client.queryRaw("SELECT VALUE qty FROM item ORDER BY id;").first?.result
     #expect(qty == .array([.int(10), .int(20), .int(3)]))
