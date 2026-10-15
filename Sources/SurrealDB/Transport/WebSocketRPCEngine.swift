@@ -102,6 +102,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         reconnectContinuation = nil
     }
 
+    func connectionIdentity() async -> Int? {
+        connected ? generation : nil
+    }
+
     func reconnectEvents() -> AsyncStream<Void> {
         reconnectContinuation?.finish()
         return AsyncStream { continuation in

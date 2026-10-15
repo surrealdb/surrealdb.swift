@@ -18,6 +18,15 @@ protocol LiveRPCEngine: RPCEngine {
     /// use this to replay session state (namespace/database/auth) that the
     /// server loses when a connection is re-established.
     func reconnectEvents() -> AsyncStream<Void>
+
+    /// Identifies the open connection, or `nil` while there's none. It
+    /// changes with every new socket, so a reconnect replay can tell whether
+    /// the connection it restored is still the current one.
+    func connectionIdentity() async -> Int?
+}
+
+extension LiveRPCEngine {
+    func connectionIdentity() async -> Int? { 0 }
 }
 
 /// Marker for engines whose connections can multiplex more than one

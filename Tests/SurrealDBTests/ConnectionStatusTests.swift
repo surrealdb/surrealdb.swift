@@ -105,6 +105,11 @@ private actor HeldReplayEngine: LiveRPCEngine {
     private var holding = false
     private var held: [CheckedContinuation<Void, Never>] = []
     private(set) var uses = 0
+    private var identity: Int? = 1
+
+    func connectionIdentity() async -> Int? { identity }
+    /// The socket dropped: no connection until the next reconnect.
+    func drop() { identity = nil }
 
     func connect() async throws {}
     func close() async {}
@@ -152,4 +157,25 @@ func connectionStatus_closeDuringReplayStaysDisconnected() async throws {
     await engine.release()
     try await Task.sleep(nanoseconds: 300_000_000)
     #expect(status.current == .disconnected)
+}
+
+@Test
+func connectionStatus_replayAfterAnotherDropDoesNotReportConnected() async throws {
+    let engine = HeldReplayEngine()
+    let status = ConnectionStatusBroadcaster()
+    let core = SurrealClientCore(engine: engine, sessionContext: SessionContext(namespace: "ns", database: "db"), status: status)
+    try await core.connect()
+    defer { Task { await core.close() } }
+    #expect(await eventually { await engine.hasSubscriber() })
+
+    await engine.hold()
+    await engine.fireReconnect()
+    #expect(await eventually { await engine.uses >= 1 })
+
+    // The new socket drops while the replay is still running.
+    await engine.drop()
+    status.send(.reconnecting(attempt: 1))
+    await engine.release()
+    try await Task.sleep(nanoseconds: 300_000_000)
+    #expect(status.current == .reconnecting(attempt: 1))
 }

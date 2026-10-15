@@ -69,10 +69,14 @@ actor SurrealClientCore {
         reconnectReplayTask = Task { [weak self] in
             for await _ in stream {
                 guard let self else { return }
+                let connection = await liveEngine.connectionIdentity()
                 await self.beginReplay()
                 // close() during the replay has already reported
                 // .disconnected; don't override it.
                 guard !Task.isCancelled, await self.isConnected else { return }
+                // Nor a drop during the replay, which reported .reconnecting;
+                // the next reconnect's replay reports .connected.
+                guard let connection, await liveEngine.connectionIdentity() == connection else { continue }
                 self.status.send(.connected)
             }
         }
