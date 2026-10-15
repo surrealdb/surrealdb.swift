@@ -53,7 +53,7 @@ enum RPCWire {
             return LiveWireEvent(
                 queryID: queryID,
                 action: action,
-                record: liveRecordValue(fromPayload: payload),
+                record: envelope.record.flatMap(nonEmpty) ?? liveRecordValue(fromPayload: payload),
                 payload: payload
             )
         }

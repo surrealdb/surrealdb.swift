@@ -590,7 +590,11 @@ actor SurrealClientCore {
     }
 
     func commitTransaction(_ id: UUID, session: SessionID?) async throws {
-        _ = try await rpc("commit", params: [.uuid(id)], session: session)
+        try Task.checkCancellation()
+        // Once sent, a commit can't be called back. Wait for its reply from a
+        // task of its own, so cancelling the caller can't report a failure
+        // for writes that were made permanent.
+        _ = try await Task { try await self.rpc("commit", params: [.uuid(id)], session: session) }.value
     }
 
     func cancelTransaction(_ id: UUID, session: SessionID?) async throws {

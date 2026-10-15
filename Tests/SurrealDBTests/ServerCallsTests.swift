@@ -180,6 +180,24 @@ func rpcError_causeMayBeNoneOrAString() {
 }
 
 @Test
+func rpcError_jsonCauseMayBeNoneOrAString() throws {
+    func decode(_ cause: String) throws -> RPCErrorObject? {
+        let json = #"{"id":"1","error":{"code":-32000,"message":"failed","cause":\#(cause)}}"#
+        return try JSONRPCCodec.decodeRPCEnvelope(Data(json.utf8)).error
+    }
+    #expect(try decode("null")?.cause == nil)
+    #expect(try decode("7")?.message == "failed")
+    #expect(try decode(#""why""#)?.cause?.message == "why")
+    #expect(try decode(#"{"message":"why"}"#)?.cause?.message == "why")
+}
+
+@Test
+func refresh_isAStateChangingCall() {
+    // A refresh that times out may still have been applied, like `signin`.
+    #expect(WebSocketRPCEngine.stateChangingMethods.contains("refresh"))
+}
+
+@Test
 func integration_initialSessionContextIsAppliedOverWebSocket() async throws {
     guard IntegrationEnv.enabled else { return }
 
