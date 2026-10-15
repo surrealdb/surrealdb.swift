@@ -176,15 +176,10 @@ func core_forkSessionReplicatesStateOntoNewSession() async throws {
     #expect(lastUse?.session == childID)
     #expect(lastAuthenticate?.session == childID)
 
-    // Variables were copied: they merge into the child's query bindings.
-    _ = try await core.queryRaw("RETURN $marker;", bindings: [:], session: child)
-    let query = await engine.lastRequest("query")
-    #expect(query?.session == childID)
-    if case .object(let bindings)? = query?.params?.last {
-        #expect(bindings["marker"] == .string("inherited"))
-    } else {
-        Issue.record("Expected query bindings object.")
-    }
+    // Variables were copied: the child gets its own server-side `let`.
+    let lastLet = await engine.lastRequest("let")
+    #expect(lastLet?.session == childID)
+    #expect(lastLet?.params == [.string("marker"), .string("inherited")])
 }
 
 @Test

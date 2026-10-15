@@ -9,14 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - CI runs every integration test against a version matrix: SurrealDB 3.3.4 (pinned) and the nightly build. `scripts/test-integration.sh` takes the server binary from `SURREALDB_BIN`.
 - The README's installation snippet now points at the current release.
+- Over WebSocket, `set(_:value:)` and `unset(_:)` now define and remove the parameter on the server (`let`/`unset`), so SurrealQL the server evaluates on its own, such as functions and permission clauses, sees it. Variables are re-defined after a reconnect and copied into forked sessions. HTTP still sends them with each query.
 ### Added
 - `SurrealWebSocketOptions.reconnectMaxDelay` caps the backoff between reconnect attempts.
+- `version()` returns the server version, and `connect()` refuses servers outside 3.0.0 up to, but not including, 5.0.0 with `SurrealError.unsupportedServerVersion`. `SurrealClientOptions.checkServerVersion` turns the check off; the range is `ServerVersion.minimum`/`maximum`.
+- `health()` checks the server's HTTP `/health` endpoint, over either transport.
+- `info()` and `info(as:)` return the signed-in record user.
+- `refresh(_:)` and `revoke(_:)` for record-access token pairs, and `authenticate(_: AuthTokens)`, which refreshes the pair when the access token has expired and returns the pair to keep. `AuthTokens.accessExpiry` reads the JWT's expiry, and `SurrealError.isTokenExpired` recognises an expired token over either transport.
+- `reset()` clears the session's namespace, database, authentication and variables.
 
 ### Security
 - Fixed SurrealQL injection in generated queries. Predicate values (`Person.Fields.name == x`) are now sent as bound variables instead of being spliced into the statement; table and field names are always backtick-escaped; record-id operations (`select(recordID:)`, `create(recordID:)` and the rest) send the id as a bound value; and `SurrealValue.sqlLiteral` now escapes backslashes, so a value ending in `\` can no longer close its own string. `SurrealPredicate` gains a `bindings` dictionary, and `SurrealPredicateValue` now requires `surrealPredicateValue: SurrealValue` in place of `surrealPredicateSQL` (source-breaking for custom conformances).
 - Added `SurrealQL.escapeIdent(_:)`, `SurrealQL.escapeFieldPath(_:)` and `SurrealQL.quote(_:)` for callers writing their own SurrealQL.
 
 ### Fixed
+- An RPC error whose `cause` was NONE or a string failed to decode, and over WebSocket that closed the connection. Such errors now arrive as `SurrealError.serverError`.
 - `update(_:content:)` and `upsert(_:content:)` with no predicate replaced every record in the table with the same content. The `where:` argument is now required (source-breaking); the table-wide forms are `updateAll(_:content:)` and `upsertAll(_:content:)`.
 - An invalid UUID string (CBOR tag 9) silently decoded to a new random `UUID()`. It now throws `SurrealError.invalidResponse`, as do other malformed tags that used to decode to an invented value (`NULL`, `""`, `0`, an empty set). A malformed value inside a response no longer reads as a missing result.
 - `KILLED` live notifications were dropped because they carry no record, so a live stream whose query the server ended (`KILL`, `REMOVE TABLE`, lost access) stayed open forever. The stream now delivers a `.killed` event and finishes. `LiveEvent` gains a typed `record: SurrealRecordID?`; `recordID` is `""` for `.killed`.

@@ -6,14 +6,38 @@ actor SurrealClientCore {
     private var sessions: [SessionID: SessionContext] = [:]
     private var reconnectReplayTask: Task<Void, Never>?
     private var activeReplay: Task<Void, Never>?
+    private let http: HTTPEndpoints?
+    private let checkServerVersion: Bool
 
-    init(engine: any RPCEngine, sessionContext: SessionContext = .init()) {
+    init(
+        engine: any RPCEngine,
+        sessionContext: SessionContext = .init(),
+        http: HTTPEndpoints? = nil,
+        checkServerVersion: Bool = false
+    ) {
         self.engine = engine
         self.rootSession = sessionContext
+        self.http = http
+        self.checkServerVersion = checkServerVersion
+    }
+
+    /// Whether the server keeps per-session state (namespace, variables) for
+    /// us. Over HTTP every request stands alone, so it's all sent each time.
+    private var serverKeepsState: Bool {
+        engine is any SessionCapableRPCEngine
     }
 
     func connect() async throws {
         try await engine.connect()
+
+        if checkServerVersion {
+            do {
+                try ServerVersion.check(try await version())
+            } catch {
+                await engine.close()
+                throw error
+            }
+        }
 
         guard let liveEngine = engine as? any LiveRPCEngine else {
             return
@@ -87,7 +111,9 @@ actor SurrealClientCore {
                 if let token = sourceContext.accessToken {
                     try await authenticate(token, session: newID)
                 }
-                sessions[newID]?.variables = sourceContext.variables
+                for (name, value) in sourceContext.variables {
+                    try await set(name, value: value, session: newID)
+                }
             }
         } catch {
             // Roll back the half-created session: detach server-side (the
@@ -188,6 +214,9 @@ actor SurrealClientCore {
         if let token = context.accessToken {
             _ = try? await performRPC("authenticate", params: [.string(token)], session: session)
         }
+        for (name, value) in context.variables {
+            _ = try? await performRPC("let", params: [.string(name), value], session: session)
+        }
     }
 
     // MARK: - Session-scoped operations
@@ -242,19 +271,102 @@ actor SurrealClientCore {
         setSessionContext(for: session) { $0.accessToken = nil }
     }
 
+    /// Defines `$name` on the server for this session (`let`). The value is
+    /// also kept locally: it's replayed after a reconnect and copied into
+    /// forks, and over HTTP, where the server keeps no session state, it's
+    /// sent with every query instead.
     func set(_ name: String, value: SurrealValue, session: SessionID?) async throws {
         _ = try sessionContext(for: session)
+        if serverKeepsState {
+            _ = try await rpc("let", params: [.string(name), value], session: session)
+        }
         setSessionContext(for: session) { $0.variables[name] = value }
     }
 
     func unset(_ name: String, session: SessionID?) async throws {
         _ = try sessionContext(for: session)
+        if serverKeepsState {
+            _ = try await rpc("unset", params: [.string(name)], session: session)
+        }
         setSessionContext(for: session) { $0.variables.removeValue(forKey: name) }
+    }
+
+    // MARK: - Server information and auth lifecycle
+
+    /// The server's version, without the `surrealdb-` prefix.
+    func version() async throws -> String {
+        let response = try await rpc("version", session: nil)
+        guard case .string(let raw) = response else {
+            throw SurrealError.invalidResponse("Expected a version string.")
+        }
+        return ServerVersion.strip(raw)
+    }
+
+    /// Checks `GET /health`. Throws if the server isn't healthy.
+    func health() async throws {
+        guard let http else {
+            throw SurrealError.unsupportedFeature("health() needs the server's HTTP endpoint.")
+        }
+        try await http.health()
+    }
+
+    /// The record of the signed-in user (`$auth`), or `NONE`.
+    func info(session: SessionID?) async throws -> SurrealValue {
+        try await rpc("info", session: session)
+    }
+
+    /// Exchanges a refresh token for a new token pair. The refresh token is
+    /// single-use: the server revokes it.
+    func refresh(_ tokens: AuthTokens, session: SessionID?) async throws -> AuthTokens {
+        guard tokens.refresh != nil else {
+            throw SurrealError.invalidCredentials("refresh() needs a refresh token; sign in with an access method that issues one.")
+        }
+        if !serverKeepsState {
+            // Over HTTP the stored access token goes out as a Bearer header,
+            // and the server rejects an expired one before reading the body.
+            setSessionContext(for: session) { $0.accessToken = nil }
+        }
+        let response = try await rpc("refresh", params: [tokens.surrealValue], session: session)
+        let refreshed = try parseAuthTokens(response)
+        setSessionContext(for: session) { $0.accessToken = refreshed.access }
+        return refreshed
+    }
+
+    /// Revokes a refresh token so it can't be used again.
+    func revoke(_ tokens: AuthTokens, session: SessionID?) async throws {
+        guard tokens.refresh != nil else {
+            throw SurrealError.invalidCredentials("revoke() needs a refresh token.")
+        }
+        _ = try await rpc("revoke", params: [tokens.surrealValue], session: session)
+    }
+
+    /// Authenticates with a token pair. If the access token has expired and
+    /// there's a refresh token, refreshes the pair and returns the new one.
+    func authenticate(_ tokens: AuthTokens, session: SessionID?) async throws -> AuthTokens {
+        if tokens.refresh != nil, let expiry = tokens.accessExpiry, expiry <= Date() {
+            return try await refresh(tokens, session: session)
+        }
+        do {
+            try await authenticate(tokens.access, session: session)
+            return tokens
+        } catch let error as SurrealError where tokens.refresh != nil && error.isTokenExpired {
+            // Expired between the check above and the server seeing it.
+            return try await refresh(tokens, session: session)
+        }
+    }
+
+    /// Clears the session on the server: namespace, database, authentication
+    /// and variables.
+    func reset(session: SessionID?) async throws {
+        if serverKeepsState {
+            _ = try await rpc("reset", session: session)
+        }
+        setSessionContext(for: session) { $0 = SessionContext() }
     }
 
     func queryRaw(_ sql: String, bindings: [String: SurrealValue], session: SessionID?) async throws -> [RPCQueryResult] {
         let context = try sessionContext(for: session)
-        var mergedBindings = context.variables
+        var mergedBindings = serverKeepsState ? [:] : context.variables
         for (key, value) in bindings {
             mergedBindings[key] = value
         }

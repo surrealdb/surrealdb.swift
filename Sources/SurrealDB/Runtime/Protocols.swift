@@ -7,10 +7,17 @@ public protocol SurrealQueryable: Sendable {
     func signup(_ credentials: SignUpCredentials) async throws -> AuthTokens
     func authenticate(_ token: String) async throws
     func invalidate() async throws
+    @discardableResult
+    func authenticate(_ tokens: AuthTokens) async throws -> AuthTokens
+    func refresh(_ tokens: AuthTokens) async throws -> AuthTokens
+    func revoke(_ tokens: AuthTokens) async throws
+    func info() async throws -> SurrealValue
+    func reset() async throws
 
-    /// Binds a variable that is merged into every subsequent query's bindings.
+    /// Defines `$name` for this session (the server's `let`), so queries can
+    /// refer to it. Kept across reconnects.
     func set(_ name: String, value: SurrealValue) async throws
-    /// Removes a previously bound variable.
+    /// Removes a variable defined with `set`.
     func unset(_ name: String) async throws
 
     func query<T: Decodable & Sendable>(_ query: SurrealQuery<T>) async throws -> [T]

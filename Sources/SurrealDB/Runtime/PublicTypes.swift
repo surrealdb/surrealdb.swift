@@ -3,13 +3,19 @@ import Foundation
 public struct SurrealClientOptions: Sendable {
     public var requestTimeout: TimeInterval
     public var pingInterval: TimeInterval
+    /// Whether `connect()` checks the server's version against
+    /// ``ServerVersion/minimum`` and ``ServerVersion/maximum`` and refuses
+    /// unsupported servers.
+    public var checkServerVersion: Bool
 
     public init(
         requestTimeout: TimeInterval = 20,
-        pingInterval: TimeInterval = 30
+        pingInterval: TimeInterval = 30,
+        checkServerVersion: Bool = true
     ) {
         self.requestTimeout = requestTimeout
         self.pingInterval = pingInterval
+        self.checkServerVersion = checkServerVersion
     }
 }
 
@@ -75,6 +81,31 @@ public struct AuthTokens: Sendable, Hashable {
     public init(access: String, refresh: String? = nil) {
         self.access = access
         self.refresh = refresh
+    }
+
+    /// When the access token expires, read from its JWT `exp` claim. `nil`
+    /// if the token isn't a JWT or has no expiry. The signature isn't
+    /// checked: this is only used to refresh early.
+    public var accessExpiry: Date? {
+        let parts = access.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var base64 = parts[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exp = claims["exp"] as? NSNumber
+        else { return nil }
+        return Date(timeIntervalSince1970: exp.doubleValue)
+    }
+
+    /// The `{ access, refresh }` object the server's `refresh` and `revoke`
+    /// methods take.
+    var surrealValue: SurrealValue {
+        var object: [String: SurrealValue] = ["access": .string(access)]
+        if let refresh {
+            object["refresh"] = .string(refresh)
+        }
+        return .object(object)
     }
 }
 

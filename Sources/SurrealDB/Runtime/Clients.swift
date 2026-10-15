@@ -54,7 +54,12 @@ public actor SurrealClient: SurrealLiveQueryable {
             throw SurrealError.invalidEndpoint(endpoint)
         }
 
-        self.core = SurrealClientCore(engine: transport, sessionContext: session)
+        self.core = SurrealClientCore(
+            engine: transport,
+            sessionContext: session,
+            http: HTTPEndpoints(rpcURL: rpcURL, timeout: options.requestTimeout),
+            checkServerVersion: options.checkServerVersion
+        )
     }
 
     public func connect() async throws {
@@ -108,6 +113,56 @@ public actor SurrealClient: SurrealLiveQueryable {
 
     public func invalidate() async throws {
         try await core.invalidate(session: nil)
+    }
+
+    /// Authenticates with a token pair, refreshing it first if the access
+    /// token has expired. Returns the pair now in use.
+    @discardableResult
+    public func authenticate(_ tokens: AuthTokens) async throws -> AuthTokens {
+        try await core.authenticate(tokens, session: nil)
+    }
+
+    /// Exchanges the refresh token for a new pair and authenticates with it.
+    /// The old refresh token is revoked by the server.
+    public func refresh(_ tokens: AuthTokens) async throws -> AuthTokens {
+        try await core.refresh(tokens, session: nil)
+    }
+
+    /// Revokes a refresh token so it can't be used again.
+    public func revoke(_ tokens: AuthTokens) async throws {
+        try await core.revoke(tokens, session: nil)
+    }
+
+    /// The signed-in user's record (`$auth`), or `.none` when not signed in
+    /// as a record user.
+    public func info() async throws -> SurrealValue {
+        try await core.info(session: nil)
+    }
+
+    /// The signed-in user's record, decoded; `nil` when there isn't one.
+    public func info<T: Decodable & Sendable>(as type: T.Type) async throws -> T? {
+        let value = try await core.info(session: nil)
+        if value == .none || value == .null {
+            return nil
+        }
+        return try value.decode(T.self)
+    }
+
+    /// Clears this session's namespace, database, authentication and
+    /// variables, on the server and locally.
+    public func reset() async throws {
+        try await core.reset(session: nil)
+    }
+
+    /// The server's version, e.g. `"3.3.4"`.
+    public func version() async throws -> String {
+        try await core.version()
+    }
+
+    /// Checks the server's `/health` endpoint, throwing if it isn't healthy.
+    /// Works for WebSocket endpoints too: it goes over HTTP to the same host.
+    public func health() async throws {
+        try await core.health()
     }
 
     public func set(_ name: String, value: SurrealValue) async throws {

@@ -81,6 +81,45 @@ public struct SurrealSession: SurrealLiveQueryable {
         try await core.invalidate(session: id)
     }
 
+    /// Authenticates with a token pair, refreshing it first if the access
+    /// token has expired. Returns the pair now in use.
+    @discardableResult
+    public func authenticate(_ tokens: AuthTokens) async throws -> AuthTokens {
+        try await core.authenticate(tokens, session: id)
+    }
+
+    /// Exchanges the refresh token for a new pair and authenticates with it.
+    /// The old refresh token is revoked by the server.
+    public func refresh(_ tokens: AuthTokens) async throws -> AuthTokens {
+        try await core.refresh(tokens, session: id)
+    }
+
+    /// Revokes a refresh token so it can't be used again.
+    public func revoke(_ tokens: AuthTokens) async throws {
+        try await core.revoke(tokens, session: id)
+    }
+
+    /// The signed-in user's record (`$auth`), or `.none` when not signed in
+    /// as a record user.
+    public func info() async throws -> SurrealValue {
+        try await core.info(session: id)
+    }
+
+    /// The signed-in user's record, decoded; `nil` when there isn't one.
+    public func info<T: Decodable & Sendable>(as type: T.Type) async throws -> T? {
+        let value = try await core.info(session: id)
+        if value == .none || value == .null {
+            return nil
+        }
+        return try value.decode(T.self)
+    }
+
+    /// Clears this session's namespace, database, authentication and
+    /// variables, on the server and locally.
+    public func reset() async throws {
+        try await core.reset(session: id)
+    }
+
     public func set(_ name: String, value: SurrealValue) async throws {
         try await core.set(name, value: value, session: id)
     }
