@@ -366,7 +366,7 @@ Session state is tracked per client instance: `session(id:)` only works for ids 
 
 ### Reconnection behaviour
 
-When the WebSocket reconnects after a drop, the client automatically re-attaches every session and replays its namespace/database selection and authentication. Bound variables live client-side, so they survive reconnects without any replay. Live queries are **not** re-registered — their streams finish when the connection drops and must be re-opened by the caller.
+When the WebSocket reconnects after a drop, the client automatically re-attaches every session and replays its namespace/database selection, authentication and variables. Live queries started with `live(_:)` are re-issued on the new connection and their streams carry on, so don't re-open them; streams from `liveOf(_:as:)` finish, since the SDK doesn't know their query. Notifications sent while the connection was down are lost.
 
 `SurrealSession` conforms to the same `SurrealQueryable`/`SurrealLiveQueryable` protocols as `SurrealClient`, so every query, CRUD, and live-query method shown elsewhere in this README works identically on a session.
 

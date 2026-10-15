@@ -13,6 +13,9 @@ actor SurrealClientCore {
     /// Between a successful `connect()` and `close()`. The engines track
     /// this themselves; it's here for the raw HTTP routes, which bypass them.
     private(set) var isConnected = false
+    /// Bumped by close(), so a connect() that resumes after one can tell
+    /// it was cut short.
+    private var closeCount = 0
     private let checkServerVersion: Bool
     let status: ConnectionStatusBroadcaster
 
@@ -37,9 +40,18 @@ actor SurrealClientCore {
     }
 
     func connect() async throws {
+        // Connected again only once this attempt succeeds.
+        isConnected = false
+        let closes = closeCount
         status.send(.connecting)
+        let liveEngine = engine as? any LiveRPCEngine
+        var reconnects: AsyncStream<Void>?
         do {
             try await engine.connect()
+            // Subscribe before anything else awaits: a reconnect during the
+            // version check or session setup below would otherwise be
+            // dropped, leaving the new socket without the session.
+            reconnects = await liveEngine?.reconnectEvents()
             if checkServerVersion {
                 try ServerVersion.check(try await version())
             }
@@ -53,38 +65,54 @@ actor SurrealClientCore {
             status.send(.disconnected)
             throw error
         }
+        // close() ran while this call was suspended: it has closed the engine
+        // and reported .disconnected, so this attempt is over.
+        guard closes == closeCount else {
+            throw SurrealError.notConnected
+        }
         isConnected = true
 
-        guard let liveEngine = engine as? any LiveRPCEngine else {
-            status.send(.connected)
-            return
+        // This call may have replaced an earlier connection (say, while it
+        // was waiting to reconnect). Bring its sessions and live queries
+        // across before returning, as a reconnect would.
+        if serverKeepsState {
+            for (id, context) in sessions {
+                try? await sendAttach(id)
+                await replay(session: id, context: context)
+            }
+        }
+        if !liveSubscriptions.isEmpty {
+            await resubscribeLiveQueries()
         }
 
-        // Subscribe before returning, not inside the task: otherwise a
-        // reconnect that fires between connect() returning and the task
-        // starting is silently dropped.
-        let stream = await liveEngine.reconnectEvents()
-
-        reconnectReplayTask?.cancel()
-        reconnectReplayTask = Task { [weak self] in
-            for await _ in stream {
-                guard let self else { return }
-                let connection = await liveEngine.connectionIdentity()
-                await self.beginReplay()
-                // close() during the replay has already reported
-                // .disconnected; don't override it.
-                guard !Task.isCancelled, await self.isConnected else { return }
-                // Nor a drop during the replay, which reported .reconnecting;
-                // the next reconnect's replay reports .connected.
-                guard let connection, await liveEngine.connectionIdentity() == connection else { continue }
-                self.status.send(.connected)
+        if let liveEngine, let reconnects {
+            reconnectReplayTask?.cancel()
+            reconnectReplayTask = Task { [weak self] in
+                for await _ in reconnects {
+                    guard let self else { return }
+                    let connection = await liveEngine.connectionIdentity()
+                    await self.beginReplay()
+                    // close() during the replay has already reported
+                    // .disconnected; don't override it.
+                    guard !Task.isCancelled, await self.isConnected else { return }
+                    // Nor a drop during the replay, which reported
+                    // .reconnecting; the next reconnect's replay reports
+                    // .connected.
+                    guard let connection, await liveEngine.connectionIdentity() == connection else { continue }
+                    self.status.send(.connected)
+                }
             }
+        }
+        // Likewise if close() ran during the replay just above.
+        guard closes == closeCount else {
+            throw SurrealError.notConnected
         }
         status.send(.connected)
     }
 
     func close() async {
         isConnected = false
+        closeCount += 1
         reconnectReplayTask?.cancel()
         reconnectReplayTask = nil
         await engine.close()
@@ -589,16 +617,28 @@ actor SurrealClientCore {
                 "Interactive transactions need a WebSocket connection. Over HTTP, use transaction { } to send the statements as one BEGIN ... COMMIT query."
             )
         }
-        let response = try await rpc("begin", session: session)
+        // Sent from a task of its own: if the caller is cancelled after the
+        // server has opened the transaction, its id still comes back, and the
+        // transaction is cancelled rather than left open. (A timeout resets
+        // the socket, which ends every transaction on it.)
+        let response = try await Task { try await self.rpc("begin", session: session) }.value
+        var opened: UUID?
         switch response {
         case .uuid(let id):
-            return id
+            opened = id
         case .string(let text):
-            if let id = UUID(uuidString: text) { return id }
+            opened = UUID(uuidString: text)
         default:
             break
         }
-        throw SurrealError.invalidResponse("Expected a transaction id from begin, got \(response.kindName).")
+        guard let id = opened else {
+            throw SurrealError.invalidResponse("Expected a transaction id from begin, got \(response.kindName).")
+        }
+        if Task.isCancelled {
+            _ = await Task { try? await self.rpc("cancel", params: [.uuid(id)], session: session) }.value
+            throw CancellationError()
+        }
+        return id
     }
 
     func commitTransaction(_ id: UUID, session: SessionID?) async throws {

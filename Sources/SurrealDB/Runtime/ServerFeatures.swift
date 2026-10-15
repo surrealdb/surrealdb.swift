@@ -32,7 +32,6 @@ public struct SurrealExportOptions: Sendable, Hashable {
     public var params: Bool?
     public var functions: Bool?
     public var analyzers: Bool?
-    public var versions: Bool?
     public var sequences: Bool?
     public var apis: Bool?
     public var buckets: Bool?
@@ -45,7 +44,6 @@ public struct SurrealExportOptions: Sendable, Hashable {
         params: Bool? = nil,
         functions: Bool? = nil,
         analyzers: Bool? = nil,
-        versions: Bool? = nil,
         sequences: Bool? = nil,
         apis: Bool? = nil,
         buckets: Bool? = nil
@@ -57,7 +55,6 @@ public struct SurrealExportOptions: Sendable, Hashable {
         self.params = params
         self.functions = functions
         self.analyzers = analyzers
-        self.versions = versions
         self.sequences = sequences
         self.apis = apis
         self.buckets = buckets
@@ -76,7 +73,7 @@ public struct SurrealExportOptions: Sendable, Hashable {
         }
         let flags: [(String, Bool?)] = [
             ("records", records), ("users", users), ("accesses", accesses), ("params", params),
-            ("functions", functions), ("analyzers", analyzers), ("versions", versions),
+            ("functions", functions), ("analyzers", analyzers),
             ("sequences", sequences), ("apis", apis), ("buckets", buckets),
         ]
         for (key, value) in flags {

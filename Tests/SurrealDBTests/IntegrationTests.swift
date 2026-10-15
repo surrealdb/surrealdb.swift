@@ -82,6 +82,13 @@ enum IntegrationEnv {
         return "\(scheme)://\(host)"
     }
 
+    /// Whether the proxy-based tests can run. `TCPProxy` forwards plain TCP
+    /// and the tests reach it over `ws://`, so a TLS host (`https://`,
+    /// `wss://`) can't sit behind it.
+    static var canProxy: Bool {
+        enabled && !["https://", "wss://"].contains { host.lowercased().hasPrefix($0) }
+    }
+
     static var hasCredentials: Bool {
         user != nil && password != nil
     }

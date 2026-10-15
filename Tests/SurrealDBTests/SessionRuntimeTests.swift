@@ -25,7 +25,11 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
     func connect() async throws {}
     func close() async {}
 
+    private var reconnectDuring: String?
+
     func failNext(_ method: String) { failingMethods.insert(method) }
+    /// Fires a reconnect while the next `method` request is in flight.
+    func reconnect(during method: String) { reconnectDuring = method }
     func holdResponses(for method: String) { heldMethods.insert(method) }
 
     func releaseResponses(for method: String) {
@@ -41,6 +45,11 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
     func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
         requests.append(.init(method: request.method, session: request.session, params: request.params))
+
+        if reconnectDuring == request.method {
+            reconnectDuring = nil
+            reconnectContinuation?.yield(())
+        }
 
         if heldMethods.contains(request.method) {
             await withCheckedContinuation { continuation in
@@ -67,6 +76,8 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
             return RPCResponseEnvelope(id: request.id, action: nil, result: .array([row]), error: nil)
         case "sessions":
             return RPCResponseEnvelope(id: request.id, action: nil, result: .array(sessionsResult), error: nil)
+        case "begin":
+            return RPCResponseEnvelope(id: request.id, action: nil, result: .uuid(UUID()), error: nil)
         default:
             return RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
         }
@@ -316,4 +327,33 @@ func core_reconnectReplayReattachesForkedSessions() async throws {
     try await waitUntil { await engine.count(of: "use") == 2 }
     let lastUse = await engine.lastRequest("use")
     #expect(lastUse?.session == id.rawValue.uuidString)
+}
+
+@Test
+func core_reconnectDuringConnectSetupIsReplayed() async throws {
+    let engine = MockSessionEngine()
+    let core = SurrealClientCore(engine: engine, sessionContext: SessionContext(namespace: "ns", database: "db"))
+    // The socket drops and comes back while connect() is still applying the
+    // session; the new socket needs it too.
+    await engine.reconnect(during: "use")
+    try await core.connect()
+    try await waitUntil { await engine.count(of: "use") == 2 }
+}
+
+@Test
+func core_beginCancelledInFlightCancelsTheTransaction() async throws {
+    let engine = MockSessionEngine()
+    let core = SurrealClientCore(engine: engine)
+    try await core.connect()
+
+    // The server opens the transaction, but the caller is cancelled before
+    // the reply arrives.
+    await engine.holdResponses(for: "begin")
+    let begin = Task { try await core.beginTransaction(session: nil) }
+    try await waitUntil { await engine.count(of: "begin") == 1 }
+    begin.cancel()
+    await engine.releaseResponses(for: "begin")
+
+    await #expect(throws: CancellationError.self) { _ = try await begin.value }
+    try await waitUntil { await engine.count(of: "cancel") == 1 }
 }

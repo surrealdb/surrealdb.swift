@@ -63,7 +63,7 @@ func connectionStatus_failedConnectEndsDisconnected() async throws {
 
 @Test
 func integration_connectionStatusFollowsReconnects() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -178,4 +178,41 @@ func connectionStatus_replayAfterAnotherDropDoesNotReportConnected() async throw
     await engine.release()
     try await Task.sleep(nanoseconds: 300_000_000)
     #expect(status.current == .reconnecting(attempt: 1))
+}
+
+/// Holds `version` until released, so a test can act mid-connect().
+private actor HeldVersionEngine: RPCEngine {
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private(set) var asked = false
+
+    func connect() async throws {}
+    func close() async {}
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        if request.method == "version" {
+            asked = true
+            await withCheckedContinuation { held.append($0) }
+            return RPCResponseEnvelope(id: request.id, action: nil, result: .string("surrealdb-3.3.4"), error: nil)
+        }
+        return RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
+    }
+
+    func release() {
+        held.forEach { $0.resume() }
+        held = []
+    }
+}
+
+@Test
+func connectionStatus_closeDuringConnectStaysDisconnected() async throws {
+    let engine = HeldVersionEngine()
+    let status = ConnectionStatusBroadcaster()
+    let core = SurrealClientCore(engine: engine, checkServerVersion: true, status: status)
+    let connecting = Task { try await core.connect() }
+    #expect(await eventually { await engine.asked })
+
+    await core.close()
+    await engine.release()
+    await #expect(throws: SurrealError.self) { try await connecting.value }
+    #expect(status.current == .disconnected)
+    #expect(await core.isConnected == false)
 }
