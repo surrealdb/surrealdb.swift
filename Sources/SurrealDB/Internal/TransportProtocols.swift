@@ -9,6 +9,9 @@ protocol RPCEngine: Actor {
 protocol LiveRPCEngine: RPCEngine {
     func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent>
     func closeLiveStream(for queryID: UUID) async
+    /// Re-keys an open stream after its live query was re-issued under a new
+    /// id, delivering anything already buffered for the new id.
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async
 
     /// Fires each time the engine successfully re-establishes a connection
     /// after an unexpected drop (not on the initial `connect()`). Consumers

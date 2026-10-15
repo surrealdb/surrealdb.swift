@@ -15,6 +15,14 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private var pending: [String: CheckedContinuation<RPCResponseEnvelope, Error>] = [:]
     private var timers: [String: Task<Void, Never>] = [:]
     private var liveContinuations: [UUID: AsyncStream<LiveWireEvent>.Continuation] = [:]
+    /// Notifications for live queries with no stream yet: the server can
+    /// send one before the `LIVE SELECT` reply has been handled, or for a
+    /// query started with raw SurrealQL that `liveOf` attaches to later.
+    /// Bounded: the oldest query ids and events are dropped first.
+    private var liveBuffer: [UUID: [LiveWireEvent]] = [:]
+    private var liveBufferOrder: [UUID] = []
+    static let liveBufferMaxQueries = 64
+    static let liveBufferMaxEvents = 256
     private var reconnectContinuation: AsyncStream<Void>.Continuation?
 
     private var connected = false
@@ -122,21 +130,75 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> {
-        AsyncStream { continuation in
-            liveContinuations[queryID] = continuation
-            continuation.onTermination = { [queryID] _ in
-                Task {
-                    await self.closeLiveStream(for: queryID)
-                }
+        let (stream, continuation) = AsyncStream<LiveWireEvent>.makeStream()
+        liveContinuations[queryID] = continuation
+        continuation.onTermination = { [queryID] _ in
+            Task {
+                await self.closeLiveStream(for: queryID)
             }
         }
+        deliverBuffered(to: queryID)
+        return stream
     }
 
     func closeLiveStream(for queryID: UUID) async {
+        dropBuffered(queryID)
         guard let continuation = liveContinuations.removeValue(forKey: queryID) else {
             return
         }
         continuation.finish()
+    }
+
+    /// Points the stream for `oldID` at `newID`, after the core has
+    /// re-issued its live query on a new connection.
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async {
+        guard let continuation = liveContinuations.removeValue(forKey: oldID) else {
+            return
+        }
+        liveContinuations[newID] = continuation
+        deliverBuffered(to: newID)
+    }
+
+    private func deliver(_ event: LiveWireEvent) {
+        guard let continuation = liveContinuations[event.queryID] else {
+            buffer(event)
+            return
+        }
+        continuation.yield(event)
+        if event.action == .killed {
+            // KILLED is the last notification for this id.
+            liveContinuations.removeValue(forKey: event.queryID)?.finish()
+        }
+    }
+
+    private func buffer(_ event: LiveWireEvent) {
+        let id = event.queryID
+        if liveBuffer[id] == nil {
+            liveBufferOrder.append(id)
+            if liveBufferOrder.count > Self.liveBufferMaxQueries {
+                liveBuffer.removeValue(forKey: liveBufferOrder.removeFirst())
+            }
+        }
+        var events = liveBuffer[id, default: []]
+        events.append(event)
+        if events.count > Self.liveBufferMaxEvents {
+            events.removeFirst(events.count - Self.liveBufferMaxEvents)
+        }
+        liveBuffer[id] = events
+    }
+
+    private func deliverBuffered(to queryID: UUID) {
+        guard let events = dropBuffered(queryID) else { return }
+        for event in events {
+            deliver(event)
+        }
+    }
+
+    @discardableResult
+    private func dropBuffered(_ queryID: UUID) -> [LiveWireEvent]? {
+        guard let events = liveBuffer.removeValue(forKey: queryID) else { return nil }
+        liveBufferOrder.removeAll { $0 == queryID }
+        return events
     }
 
     // MARK: - Socket lifecycle
@@ -296,11 +358,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             return
         }
 
-        liveContinuations[liveEvent.queryID]?.yield(liveEvent)
-        if liveEvent.action == .killed {
-            // KILLED is the last notification for this id.
-            liveContinuations.removeValue(forKey: liveEvent.queryID)?.finish()
-        }
+        deliver(liveEvent)
     }
 
     // MARK: - Reconnect
@@ -313,9 +371,13 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         tearDownSocket(closeCode: .goingAway)
 
         failPending(with: SurrealError.connectionLost(cause: error))
-        finishAllLiveStreams()
+        // Notifications for the old connection's live queries can't be
+        // claimed any more: their ids die with it.
+        liveBuffer.removeAll()
+        liveBufferOrder.removeAll()
 
         guard !closedByClient, wsOptions.reconnectEnabled, wsOptions.maxReconnectAttempts > 0 else {
+            finishAllLiveStreams()
             return
         }
 
@@ -334,12 +396,16 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
             do {
                 try await establishSocket()
+                // Live streams stay open across the reconnect; the core
+                // re-issues their queries and moves them to the new ids.
                 reconnectContinuation?.yield(())
                 return
             } catch {
                 continue
             }
         }
+        // Out of attempts: nothing will feed the live streams again.
+        finishAllLiveStreams()
     }
 
     /// `base * 2^(attempt - 1)`, capped at `reconnectMaxDelay`.
@@ -373,6 +439,8 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func finishAllLiveStreams() {
         let continuations = liveContinuations.values
         liveContinuations.removeAll(keepingCapacity: false)
+        liveBuffer.removeAll()
+        liveBufferOrder.removeAll()
         for continuation in continuations {
             continuation.finish()
         }

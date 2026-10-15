@@ -6,6 +6,9 @@ actor SurrealClientCore {
     private var sessions: [SessionID: SessionContext] = [:]
     private var reconnectReplayTask: Task<Void, Never>?
     private var activeReplay: Task<Void, Never>?
+    /// Open live streams, by a local token that stays the same when a
+    /// reconnect gives the query a new server id.
+    private var liveSubscriptions: [UUID: LiveSubscription] = [:]
     let http: HTTPEndpoints?
     private let checkServerVersion: Bool
 
@@ -182,6 +185,7 @@ actor SurrealClientCore {
         let task = Task { [weak self] in
             guard let self else { return }
             await self.replayAllSessions()
+            await self.resubscribeLiveQueries()
         }
         activeReplay = task
         await task.value
@@ -364,12 +368,19 @@ actor SurrealClientCore {
         setSessionContext(for: session) { $0 = SessionContext() }
     }
 
-    func queryRaw(_ sql: String, bindings: [String: SurrealValue], session: SessionID?, txn: UUID? = nil) async throws -> [RPCQueryResult] {
+    /// A query's bindings, plus the session's variables over HTTP, where the
+    /// server doesn't hold them.
+    func queryBindings(_ bindings: [String: SurrealValue], session: SessionID?) throws -> [String: SurrealValue] {
         let context = try sessionContext(for: session)
         var mergedBindings = serverKeepsState ? [:] : context.variables
         for (key, value) in bindings {
             mergedBindings[key] = value
         }
+        return mergedBindings
+    }
+
+    func queryRaw(_ sql: String, bindings: [String: SurrealValue], session: SessionID?, txn: UUID? = nil) async throws -> [RPCQueryResult] {
+        let mergedBindings = try queryBindings(bindings, session: session)
 
         let response = try await rpc(
             "query",
@@ -563,7 +574,7 @@ actor SurrealClientCore {
     /// directly: its own `use`/`authenticate` calls would otherwise hit the
     /// `activeReplay` gate above and await the replay task from within the
     /// replay task — deadlocking the whole client.
-    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil) async throws -> SurrealValue {
+    func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil) async throws -> SurrealValue {
         let context = try sessionContext(for: session)
         let request = RPCRequest(
             id: UUID().uuidString,
@@ -644,34 +655,48 @@ actor SurrealClientCore {
 
 extension SurrealClientCore {
     func live<T: Decodable & Sendable>(_ query: LiveQuery<T>, session: SessionID?) async throws -> AsyncStream<LiveEvent<T>> {
+        let liveEngine = try requireLiveEngine()
+        let queryID = try await registerLiveQuery(sql: query.sql, bindings: query.bindings, session: session, gated: true)
+        let subscription = LiveSubscription(query: LiveSubscription.Query(sql: query.sql, bindings: query.bindings), session: session, serverID: queryID)
+        return await stream(for: subscription, engine: liveEngine, as: T.self)
+    }
+
+    /// Attaches to a live query that's already running on this connection,
+    /// such as one started with a raw `LIVE SELECT`. Notifications that
+    /// arrived before this call are delivered first. The SDK doesn't know
+    /// its query, so it can't re-issue it after a reconnect: the stream
+    /// finishes instead.
+    func liveOf<T: Decodable & Sendable>(_ queryID: UUID, session: SessionID?, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>> {
+        let liveEngine = try requireLiveEngine()
+        _ = try sessionContext(for: session)
+        let subscription = LiveSubscription(query: nil, session: session, serverID: queryID)
+        return await stream(for: subscription, engine: liveEngine, as: T.self)
+    }
+
+    private func requireLiveEngine() throws -> any LiveRPCEngine {
         guard let liveEngine = engine as? any LiveRPCEngine else {
             throw SurrealError.unsupportedFeature(
                 "Live queries require a WebSocket endpoint (ws:// or wss://); the current endpoint uses HTTP."
             )
         }
+        return liveEngine
+    }
 
-        let queryID = try await registerLiveQuery(query, session: session)
-        let wireStream = await liveEngine.openLiveStream(for: queryID)
+    private func stream<T: Decodable & Sendable>(
+        for subscription: LiveSubscription,
+        engine liveEngine: any LiveRPCEngine,
+        as type: T.Type
+    ) async -> AsyncStream<LiveEvent<T>> {
+        let token = UUID()
+        liveSubscriptions[token] = subscription
+        let wireStream = await liveEngine.openLiveStream(for: subscription.serverID)
+        let session = subscription.session
 
         let killed = KilledFlag()
         return AsyncStream { continuation in
             let forwardTask = Task {
                 for await event in wireStream {
-                    let decoded = event.action == .killed ? nil : try? event.payload.decode(T.self)
-                    var record: SurrealRecordID?
-                    if case .recordID(let id)? = event.record {
-                        record = id
-                    }
-                    continuation.yield(
-                        LiveEvent(
-                            queryID: event.queryID,
-                            action: event.action,
-                            recordID: event.recordID,
-                            record: record,
-                            rawPayload: event.payload,
-                            decoded: decoded
-                        )
-                    )
+                    continuation.yield(Self.liveEvent(from: event, as: T.self))
                     if event.action == .killed {
                         // The server has already dropped it; don't KILL again.
                         killed.set()
@@ -681,9 +706,12 @@ extension SurrealClientCore {
                 continuation.finish()
             }
 
-            continuation.onTermination = { [queryID] _ in
+            continuation.onTermination = { _ in
                 forwardTask.cancel()
                 Task {
+                    // The server id changes when a reconnect re-issues the
+                    // query, so look up the current one.
+                    guard let queryID = await self.removeLiveSubscription(token) else { return }
                     if !killed.isSet {
                         try? await self.kill(liveQueryID: queryID, session: session)
                     }
@@ -693,11 +721,67 @@ extension SurrealClientCore {
         }
     }
 
-    private func registerLiveQuery<T: Decodable & Sendable>(_ query: LiveQuery<T>, session: SessionID?) async throws -> UUID {
-        let results = try await queryRaw(query.sql, bindings: query.bindings, session: session)
+    private static func liveEvent<T: Decodable & Sendable>(from event: LiveWireEvent, as type: T.Type) -> LiveEvent<T> {
+        let decoded = event.action == .killed ? nil : try? event.payload.decode(T.self)
+        var record: SurrealRecordID?
+        if case .recordID(let id)? = event.record {
+            record = id
+        }
+        return LiveEvent(
+            queryID: event.queryID,
+            action: event.action,
+            recordID: event.recordID,
+            record: record,
+            rawPayload: event.payload,
+            decoded: decoded
+        )
+    }
+
+    private func removeLiveSubscription(_ token: UUID) -> UUID? {
+        liveSubscriptions.removeValue(forKey: token)?.serverID
+    }
+
+    /// After a reconnect, and after the sessions have been replayed: re-issue
+    /// every live query on the new connection and move its stream to the new
+    /// id. A query that can't be re-issued (or was attached with `liveOf`)
+    /// has its stream finished.
+    func resubscribeLiveQueries() async {
+        guard let liveEngine = engine as? any LiveRPCEngine else { return }
+        for (token, subscription) in liveSubscriptions {
+            let oldID = subscription.serverID
+            guard let query = subscription.query,
+                  let newID = try? await registerLiveQuery(sql: query.sql, bindings: query.bindings, session: subscription.session, gated: false)
+            else {
+                liveSubscriptions.removeValue(forKey: token)
+                await liveEngine.closeLiveStream(for: oldID)
+                continue
+            }
+            guard liveSubscriptions[token] != nil else {
+                // The stream ended while the query was being re-issued.
+                _ = try? await performRPC("kill", params: [.uuid(newID)], session: subscription.session)
+                continue
+            }
+            liveSubscriptions[token]?.serverID = newID
+            await liveEngine.moveLiveStream(from: oldID, to: newID)
+        }
+    }
+
+    /// Runs a `LIVE SELECT` and returns its id. `gated: false` skips the
+    /// reconnect-replay gate, for use from the replay itself.
+    private func registerLiveQuery(sql: String, bindings: [String: SurrealValue], session: SessionID?, gated: Bool) async throws -> UUID {
+        let response: SurrealValue
+        if gated {
+            response = try await rpc("query", params: [.string(sql), .object(queryBindings(bindings, session: session))], session: session)
+        } else {
+            response = try await performRPC("query", params: [.string(sql), .object(queryBindings(bindings, session: session))], session: session)
+        }
+        let results = try RPCWire.decodeQueryResults(from: response)
 
         guard let first = results.first else {
             throw SurrealError.invalidResponse("Expected live query registration result.")
+        }
+        guard first.status == .ok else {
+            throw SurrealError.queryErrors([QueryErrorDetail(index: 0, message: first.errorMessage, kind: first.kind, details: first.details)])
         }
 
         let candidate = first.result
@@ -723,6 +807,20 @@ extension SurrealClientCore {
             throw SurrealError.invalidResponse("Unexpected live query registration format.")
         }
     }
+}
+
+/// A live stream the core keeps alive across reconnects.
+struct LiveSubscription: Sendable {
+    struct Query: Sendable {
+        let sql: String
+        let bindings: [String: SurrealValue]
+    }
+
+    /// `nil` for streams attached with `liveOf`, which can't be re-issued.
+    let query: Query?
+    let session: SessionID?
+    /// The id the server knows the query by on the current connection.
+    var serverID: UUID
 }
 
 /// Set once a live stream has seen `KILLED`.

@@ -402,6 +402,15 @@ public struct SurrealSession: SurrealLiveQueryable {
         try await core.live(query, session: id)
     }
 
+    /// Attaches to a live query already running on this connection, such as
+    /// one started with a raw `LIVE SELECT`, and streams its notifications,
+    /// starting with any that arrived before this call. Unlike `live(_:)`,
+    /// the stream finishes on a reconnect: the SDK doesn't know the query,
+    /// so it can't re-issue it.
+    public func liveOf<T: Decodable & Sendable>(_ queryID: UUID, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>> {
+        try await core.liveOf(queryID, session: id, as: type)
+    }
+
     public func kill(liveQueryID: UUID) async throws {
         try await core.kill(liveQueryID: liveQueryID, session: id)
     }

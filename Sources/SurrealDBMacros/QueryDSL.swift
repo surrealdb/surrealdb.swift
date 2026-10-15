@@ -289,6 +289,21 @@ public enum SurrealDSL {
         return .init(sql: sql + ";", bindings: merging(bindings, predicate))
     }
 
+    /// A live query whose notifications carry the change to each record as
+    /// patch operations (`LIVE SELECT DIFF`), rather than the whole record.
+    /// A created record arrives as a single `replace` of the root path.
+    public static func liveDiff<Model: SurrealModel>(
+        _ model: Model.Type,
+        where predicate: SurrealPredicate? = nil,
+        bindings: [String: SurrealValue] = [:]
+    ) -> LiveQuery<[SurrealPatchOperation]> {
+        var sql = "LIVE SELECT DIFF FROM \(SurrealQL.escapeIdent(model.surrealTable))"
+        if let predicate {
+            sql += " WHERE \(predicate.raw)"
+        }
+        return .init(sql: sql + ";", bindings: merging(bindings, predicate))
+    }
+
     /// Explicit bindings win over a predicate's generated ones; the generated
     /// names (`_pvN`) can't clash with them in practice.
     private static func merging(
