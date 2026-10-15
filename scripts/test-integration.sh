@@ -85,7 +85,8 @@ start_local_surreal() {
   fi
 
   mkdir -p .build
-  "${surreal_bin}" start --log info --user "${SURREALDB_USER}" --pass "${SURREALDB_PASSWORD}" memory --bind "${SURREALDB_BIND_HOST}:${SURREALDB_PORT}" > .build/surrealdb.log 2>&1 &
+  # Files (`DEFINE BUCKET`, `f"..."`) are experimental; the file tests need them.
+  SURREAL_CAPS_ALLOW_EXPERIMENTAL=files "${surreal_bin}" start --log info --user "${SURREALDB_USER}" --pass "${SURREALDB_PASSWORD}" memory --bind "${SURREALDB_BIND_HOST}:${SURREALDB_PORT}" > .build/surrealdb.log 2>&1 &
   SURREAL_PID="$!"
   START_MODE="local"
 }

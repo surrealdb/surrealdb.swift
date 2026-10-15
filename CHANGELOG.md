@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `merge(recordID:with:as:)` and `merge(_:with:where:)` merge fields into records; `patch(recordID:_:as:)` applies JSON Patch operations (`SurrealPatchOperation`).
 - `relate(_:_:_:content:as:)` creates edges, from one record to another or from each record in one list to each in another.
 - Record ranges: `SurrealRecordRange` with `select(range:as:)`, `merge(range:with:as:)` and `delete(range:as:)`. `SurrealRange` can be built from Swift `Int64` ranges (`1...10`, `1..<10`, `5...`, `..<5`, `...5`).
+- File references: `SurrealValue.file(SurrealFileRef)` for SurrealDB's file values (`f"bucket:/key"`, CBOR tag 55), which used to fail to decode. `SurrealFileRef` fields in Codable types map to it. The integration scripts start the server with the experimental `files` capability.
 
 ### Security
 - Fixed SurrealQL injection in generated queries. Predicate values (`Person.Fields.name == x`) are now sent as bound variables instead of being spliced into the statement; table and field names are always backtick-escaped; record-id operations (`select(recordID:)`, `create(recordID:)` and the rest) send the id as a bound value; and `SurrealValue.sqlLiteral` now escapes backslashes, so a value ending in `\` can no longer close its own string. `SurrealPredicate` gains a `bindings` dictionary, and `SurrealPredicateValue` now requires `surrealPredicateValue: SurrealValue` in place of `surrealPredicateSQL` (source-breaking for custom conformances).

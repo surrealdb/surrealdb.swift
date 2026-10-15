@@ -144,6 +144,37 @@ public struct SurrealRange: Sendable, Hashable, Codable {
     }
 }
 
+/// A reference to a file in a bucket (`f"bucket:/key"`). The bucket is
+/// defined with `DEFINE BUCKET`; files are an experimental server feature.
+public struct SurrealFileRef: Sendable, Hashable, Codable {
+    public let bucket: String
+    public let key: String
+
+    /// `key` is the file's path in the bucket. It always starts with `/`,
+    /// which is added when missing, as the server does.
+    public init(bucket: String, key: String) {
+        self.bucket = bucket
+        self.key = key.hasPrefix("/") ? key : "/" + key
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case bucket, key
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            bucket: try container.decode(String.self, forKey: .bucket),
+            key: try container.decode(String.self, forKey: .key)
+        )
+    }
+
+    /// `bucket:/key`, as inside the `f"..."` literal.
+    public var rawValue: String {
+        "\(bucket):\(key)"
+    }
+}
+
 public enum SurrealGeometry: Sendable, Hashable, Codable {
     case point([Double])
     case line([[Double]])
@@ -173,6 +204,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
     case range(SurrealRange)
     case set([SurrealValue])
     case geometry(SurrealGeometry)
+    case file(SurrealFileRef)
 
     case array([SurrealValue])
     case object([String: SurrealValue])
@@ -250,6 +282,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             try container.encode(value)
         case .geometry(let value):
             try container.encode(String(describing: value))
+        case .file(let value):
+            try container.encode(value.rawValue)
         case .array(let value):
             try container.encode(value)
         case .object(let value):
@@ -323,6 +357,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return try value.map { try $0.jsonObject() }
         case .geometry(let value):
             return ["geometry": String(describing: value)]
+        case .file(let value):
+            return value.rawValue
         case .array(let value):
             return try value.map { try $0.jsonObject() }
         case .object(let value):
@@ -369,6 +405,9 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .geometry:
             return "<geometry>"
+        case .file(let value):
+            // File literals take no escapes, so build it from strings.
+            return "type::file(\(SurrealQL.quote(value.bucket)), \(SurrealQL.quote(value.key)))"
         case .array(let value):
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .object(let value):

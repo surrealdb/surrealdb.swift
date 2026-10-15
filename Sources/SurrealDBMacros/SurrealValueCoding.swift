@@ -17,8 +17,8 @@ extension SurrealValue {
     }
 
     /// Encodes a Codable value straight into a `SurrealValue`. `Date`, `UUID`,
-    /// `Data`, `Decimal`, `SurrealRecordID` and `SurrealValue` keep their
-    /// SurrealDB types.
+    /// `Data`, `Decimal`, `SurrealRecordID`, `SurrealFileRef` and
+    /// `SurrealValue` keep their SurrealDB types.
     public static func fromEncodable<T: Encodable>(_ value: T) throws -> SurrealValue {
         try SurrealValueEncoder.box(value, codingPath: [])
     }
@@ -114,6 +114,20 @@ struct SurrealValueDecoder: Decoder {
         if type == SurrealRecordID.self {
             return try unboxRecordID(value, codingPath) as? T
         }
+        if type == SurrealFileRef.self {
+            switch value {
+            case .file(let file):
+                return file as? T
+            case .object(let object):
+                // The synthesized Codable shape, for values that came through JSON.
+                guard case .string(let bucket)? = object["bucket"], case .string(let key)? = object["key"] else {
+                    throw mismatch(SurrealFileRef.self, value, codingPath)
+                }
+                return SurrealFileRef(bucket: bucket, key: key) as? T
+            default:
+                throw mismatch(SurrealFileRef.self, value, codingPath)
+            }
+        }
         if type == URL.self {
             let string = try unboxString(value, codingPath)
             guard let url = URL(string: string) else {
@@ -136,6 +150,8 @@ struct SurrealValueDecoder: Decoder {
             return text
         case .datetime(let date):
             return SurrealValue.iso8601Fractional(date)
+        case .file(let file):
+            return file.rawValue
         default:
             throw mismatch(String.self, value, codingPath)
         }
@@ -469,6 +485,8 @@ final class SurrealValueEncoder: Encoder {
             return .decimal(NSDecimalNumber(decimal: value).stringValue)
         case let value as SurrealRecordID:
             return .recordID(value)
+        case let value as SurrealFileRef:
+            return .file(value)
         case let value as URL:
             return .string(value.absoluteString)
         default:
@@ -735,6 +753,7 @@ extension SurrealValue {
         case .range: "range"
         case .set: "set"
         case .geometry: "geometry"
+        case .file: "file"
         case .array: "array"
         case .object: "object"
         }
