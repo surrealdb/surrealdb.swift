@@ -46,8 +46,10 @@ actor SurrealClientCore {
         status.send(.connecting)
         let liveEngine = engine as? any LiveRPCEngine
         var reconnects: AsyncStream<Void>?
+        var connection: Int?
         do {
             try await engine.connect()
+            connection = await liveEngine?.connectionIdentity()
             // Subscribe before anything else awaits: a reconnect during the
             // version check or session setup below would otherwise be
             // dropped, leaving the new socket without the session.
@@ -108,7 +110,16 @@ actor SurrealClientCore {
         guard closes == closeCount else {
             throw SurrealError.notConnected
         }
-        status.send(.connected)
+        if let liveEngine {
+            // A drop since engine.connect() has reported .reconnecting (or
+            // .disconnected) already; the reconnect's replay reports
+            // .connected when there's a socket again.
+            guard let connection else { return }
+            let status = self.status
+            await liveEngine.ifConnectionIs(connection) { status.send(.connected) }
+        } else {
+            status.send(.connected)
+        }
     }
 
     func close() async {

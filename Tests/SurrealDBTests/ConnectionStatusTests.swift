@@ -236,6 +236,40 @@ func connectionStatus_dropRightAfterTheReplayIsNotOverwritten() async throws {
     #expect(status.current == .reconnecting(attempt: 1))
 }
 
+/// A live engine whose socket drops while connect() checks the version.
+private actor DropDuringConnectEngine: LiveRPCEngine {
+    private let status: ConnectionStatusBroadcaster
+    private var identity: Int? = 1
+
+    init(status: ConnectionStatusBroadcaster) { self.status = status }
+
+    func connectionIdentity() async -> Int? { identity }
+    func connect() async throws {}
+    func close() async {}
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        if request.method == "version" {
+            identity = nil
+            status.send(.reconnecting(attempt: 1))
+            return RPCResponseEnvelope(id: request.id, action: nil, result: .string("surrealdb-3.3.4"), error: nil)
+        }
+        return RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
+    }
+    func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> { AsyncStream { $0.finish() } }
+    func closeLiveStream(for queryID: UUID) async {}
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async {}
+    func reconnectEvents() -> AsyncStream<Void> { AsyncStream { _ in } }
+}
+
+@Test
+func connectionStatus_dropDuringConnectIsNotOverwritten() async throws {
+    let status = ConnectionStatusBroadcaster()
+    let engine = DropDuringConnectEngine(status: status)
+    let core = SurrealClientCore(engine: engine, checkServerVersion: true, status: status)
+    try await core.connect()
+    defer { Task { await core.close() } }
+    #expect(status.current == .reconnecting(attempt: 1))
+}
+
 /// Holds `version` until released, so a test can act mid-connect().
 private actor HeldVersionEngine: RPCEngine {
     private var held: [CheckedContinuation<Void, Never>] = []
