@@ -176,7 +176,8 @@ struct SurrealValueDecoder: Decoder {
         case .int(let int):
             return Double(int)
         case .decimal(let text):
-            guard let double = Double(text) else { throw mismatch(Double.self, value, codingPath) }
+            // Double("1e1000") is infinity, not nil.
+            guard let double = Double(text), double.isFinite else { throw mismatch(Double.self, value, codingPath) }
             return double
         default:
             throw mismatch(Double.self, value, codingPath)

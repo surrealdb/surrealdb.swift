@@ -52,6 +52,12 @@ func import_failedStatementsInA200AreReported() async throws {
         #expect(failures.first?.message.contains("keep:a") == true)
     }
 
+    // A body that isn't a result list can't be trusted to mean success.
+    ImportStub.body = Data("<html>proxy error</html>".utf8)
+    await #expect(throws: SurrealError.self) {
+        try await endpoints.importSQL("OPTION IMPORT;", session: SessionContext())
+    }
+
     // A 200 with an empty result list is a clean import.
     ImportStub.body = try CBORSerialization.data(from: CBORSurrealCodec.toCBOR(.array([])))
     try await endpoints.importSQL("OPTION IMPORT;", session: SessionContext())
@@ -91,7 +97,7 @@ func exportOptions_onlySendsWhatWasSet() throws {
     #expect(only.count == 2)
     let excluding = SurrealExportOptions(tables: .excluding(["c"])).jsonObject
     #expect((excluding["tables"] as? [String: [String]]) == ["exclude": ["c"]])
-    #expect(SurrealExportOptions(tables: SurrealExportOptions.Tables.none).jsonObject["tables"] as? Bool == false)
+    #expect(SurrealExportOptions(tables: .noTables).jsonObject["tables"] as? Bool == false)
 }
 
 @Test

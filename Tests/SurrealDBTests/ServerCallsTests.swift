@@ -202,3 +202,49 @@ func integration_initialSessionContextIsAppliedOverWebSocket() async throws {
     defer { Task { await client.close() } }
     #expect(try await client.queryRaw("RETURN [$v, (SELECT VALUE n FROM ONLY thing:1)];").first?.result == .array([.int(7), .int(1)]))
 }
+
+/// Answers `version` with a fixed value and records whether it carried a
+/// token.
+private actor VersionEngine: RPCEngine {
+    let answer: SurrealValue
+    private(set) var versionTokens: [String?] = []
+
+    init(answer: SurrealValue) { self.answer = answer }
+
+    func connect() async throws {}
+    func close() async {}
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        if request.method == "version" {
+            versionTokens.append(session.accessToken)
+        }
+        return RPCResponseEnvelope(id: request.id, action: nil, result: request.method == "version" ? answer : .null, error: nil)
+    }
+}
+
+@Test
+func version_acceptsStringAndObjectAndOmitsTheToken() async throws {
+    for answer: SurrealValue in [
+        .string("surrealdb-3.3.4"),
+        .object(["version": .string("surrealdb-3.3.4"), "build": .string("abc"), "timestamp": .string("2026-01-01")]),
+    ] {
+        let engine = VersionEngine(answer: answer)
+        let core = SurrealClientCore(engine: engine, sessionContext: SessionContext(accessToken: "stale"), checkServerVersion: true)
+        try await core.connect()
+        #expect(try await core.version() == "3.3.4")
+        #expect(await engine.versionTokens == [nil, nil])
+    }
+    let core = SurrealClientCore(engine: VersionEngine(answer: .int(3)))
+    await #expect(throws: SurrealError.self) { _ = try await core.version() }
+}
+
+@Test
+func integration_httpConnectsDespiteAStaleToken() async throws {
+    guard IntegrationEnv.enabled, IntegrationEnv.hasCredentials else { return }
+
+    let client = try SurrealClient(endpoint: httpEndpoint(), session: SessionContext(accessToken: "stale.token.value"))
+    try await client.connect()
+    defer { Task { await client.close() } }
+    try await authenticateIfNeeded(client)
+    try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
+    #expect(try await client.queryRaw("RETURN 1;").first?.result == .int(1))
+}
