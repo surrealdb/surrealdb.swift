@@ -148,6 +148,21 @@ let client = try SurrealClient(
 )
 ```
 
+You can watch the connection's state, for example to show it in your UI:
+
+```swift
+for await status in client.connectionStatusUpdates() {
+    switch status {
+    case .connecting: print("Connecting…")
+    case .connected: print("Connected")
+    case .reconnecting(let attempt): print("Reconnecting (attempt \(attempt))…")
+    case .disconnected: print("Disconnected")
+    }
+}
+```
+
+The stream starts with the current status. `client.connectionStatus` reads it without waiting. After a reconnect, `.connected` comes once the sessions and live queries are restored.
+
 `connect()` waits for the server to answer before returning, and throws if it can't be reached within `requestTimeout`. After a drop, the client retries up to `maxReconnectAttempts` times, doubling the delay from `reconnectBaseDelay` up to `reconnectMaxDelay`, then gives up; calling `connect()` again starts over.
 
 ### Wire Protocol

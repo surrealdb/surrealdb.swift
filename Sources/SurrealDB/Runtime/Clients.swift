@@ -30,6 +30,7 @@ public actor SurrealClient: SurrealLiveQueryable {
     ) throws {
         let rpcURL = try Endpoint.normalizedRPCURL(from: endpoint)
         let codec = makeWireCodec(wireProtocol)
+        let status = ConnectionStatusBroadcaster()
 
         let transport: any RPCEngine
         switch rpcURL.scheme?.lowercased() {
@@ -39,7 +40,8 @@ public actor SurrealClient: SurrealLiveQueryable {
                 endpoint: rpcURL,
                 clientOptions: options,
                 wsOptions: websocketOptions,
-                codec: codec
+                codec: codec,
+                status: status
             )
         case "http", "https":
             self.engine = .http
@@ -58,8 +60,28 @@ public actor SurrealClient: SurrealLiveQueryable {
             engine: transport,
             sessionContext: session,
             http: HTTPEndpoints(rpcURL: rpcURL, timeout: options.requestTimeout),
-            checkServerVersion: options.checkServerVersion
+            checkServerVersion: options.checkServerVersion,
+            status: status
         )
+        self.status = status
+    }
+
+    private nonisolated let status: ConnectionStatusBroadcaster
+
+    /// Where the connection stands right now.
+    public nonisolated var connectionStatus: SurrealConnectionStatus {
+        status.current
+    }
+
+    /// A stream that starts with the current status and then yields each
+    /// change: `.connecting` and `.connected` on `connect()`,
+    /// `.reconnecting(attempt:)` while a WebSocket retries after a drop,
+    /// `.connected` once it's back and sessions and live queries are
+    /// restored, and `.disconnected` after `close()` or when retrying gives
+    /// up. If you fall far behind, older updates are dropped in favour of the
+    /// latest.
+    public nonisolated func connectionStatusUpdates() -> AsyncStream<SurrealConnectionStatus> {
+        status.updates()
     }
 
     public func connect() async throws {

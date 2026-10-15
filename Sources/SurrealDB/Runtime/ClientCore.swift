@@ -11,13 +11,16 @@ actor SurrealClientCore {
     private var liveSubscriptions: [UUID: LiveSubscription] = [:]
     let http: HTTPEndpoints?
     private let checkServerVersion: Bool
+    let status: ConnectionStatusBroadcaster
 
     init(
         engine: any RPCEngine,
         sessionContext: SessionContext = .init(),
         http: HTTPEndpoints? = nil,
-        checkServerVersion: Bool = false
+        checkServerVersion: Bool = false,
+        status: ConnectionStatusBroadcaster = ConnectionStatusBroadcaster()
     ) {
+        self.status = status
         self.engine = engine
         self.rootSession = sessionContext
         self.http = http
@@ -31,18 +34,20 @@ actor SurrealClientCore {
     }
 
     func connect() async throws {
-        try await engine.connect()
-
-        if checkServerVersion {
-            do {
+        status.send(.connecting)
+        do {
+            try await engine.connect()
+            if checkServerVersion {
                 try ServerVersion.check(try await version())
-            } catch {
-                await engine.close()
-                throw error
             }
+        } catch {
+            await engine.close()
+            status.send(.disconnected)
+            throw error
         }
 
         guard let liveEngine = engine as? any LiveRPCEngine else {
+            status.send(.connected)
             return
         }
 
@@ -56,14 +61,17 @@ actor SurrealClientCore {
             for await _ in stream {
                 guard let self else { return }
                 await self.beginReplay()
+                self.status.send(.connected)
             }
         }
+        status.send(.connected)
     }
 
     func close() async {
         reconnectReplayTask?.cancel()
         reconnectReplayTask = nil
         await engine.close()
+        status.send(.disconnected)
     }
 
     // MARK: - Session state lookup/mutation

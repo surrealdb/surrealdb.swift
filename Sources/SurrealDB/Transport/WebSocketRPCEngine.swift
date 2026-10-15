@@ -6,6 +6,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private let clientOptions: SurrealClientOptions
     private let wsOptions: SurrealWebSocketOptions
     private let codec: any WireCodec
+    private let status: ConnectionStatusBroadcaster?
 
     private var task: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -38,8 +39,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         clientOptions: SurrealClientOptions,
         wsOptions: SurrealWebSocketOptions,
         codec: any WireCodec,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = .shared,
+        status: ConnectionStatusBroadcaster? = nil
     ) {
+        self.status = status
         self.endpoint = Endpoint.asWebSocket(endpoint)
         self.clientOptions = clientOptions
         self.wsOptions = wsOptions
@@ -378,8 +381,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
         guard !closedByClient, wsOptions.reconnectEnabled, wsOptions.maxReconnectAttempts > 0 else {
             finishAllLiveStreams()
+            status?.send(.disconnected)
             return
         }
+        status?.send(.reconnecting(attempt: 1))
 
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
@@ -393,6 +398,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
 
             guard !Task.isCancelled, !closedByClient else { return }
+            status?.send(.reconnecting(attempt: attempt))
 
             do {
                 try await establishSocket()
@@ -406,6 +412,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         }
         // Out of attempts: nothing will feed the live streams again.
         finishAllLiveStreams()
+        status?.send(.disconnected)
     }
 
     /// `base * 2^(attempt - 1)`, capped at `reconnectMaxDelay`.
