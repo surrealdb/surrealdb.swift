@@ -303,12 +303,16 @@ actor SurrealClientCore {
         return try await self.query(query, session: session)
     }
 
+    /// Record ids are always sent as bound values, never spliced into the
+    /// statement text.
+    private static let recordBinding = "_sdk_record"
+
     func select<Model: SurrealModel & Decodable & Sendable>(
         recordID: SurrealRecordID,
         as model: Model.Type,
         session: SessionID?
     ) async throws -> Model? {
-        let query = SurrealQuery<Model>(sql: "SELECT * FROM \(recordID.rawValue) LIMIT 1;")
+        let query = SurrealQuery<Model>(sql: "SELECT * FROM type::record($\(Self.recordBinding));", bindings: [Self.recordBinding: .recordID(recordID)])
         return try await self.query(query, session: session).first
     }
 
@@ -319,8 +323,8 @@ actor SurrealClientCore {
     ) async throws -> Model? {
         let payload = try SurrealValue.fromEncodable(content)
         let query = SurrealQuery<Model>(
-            sql: "CREATE \(recordID.rawValue) CONTENT $content;",
-            bindings: ["content": payload]
+            sql: "CREATE type::record($\(Self.recordBinding)) CONTENT $content;",
+            bindings: [Self.recordBinding: .recordID(recordID), "content": payload]
         )
         return try await self.query(query, session: session).first
     }
@@ -363,8 +367,8 @@ actor SurrealClientCore {
     ) async throws -> Model? {
         let payload = try SurrealValue.fromEncodable(content)
         let query = SurrealQuery<Model>(
-            sql: "UPDATE \(recordID.rawValue) CONTENT $content;",
-            bindings: ["content": payload]
+            sql: "UPDATE type::record($\(Self.recordBinding)) CONTENT $content;",
+            bindings: [Self.recordBinding: .recordID(recordID), "content": payload]
         )
         return try await self.query(query, session: session).first
     }
@@ -376,8 +380,8 @@ actor SurrealClientCore {
     ) async throws -> Model? {
         let payload = try SurrealValue.fromEncodable(content)
         let query = SurrealQuery<Model>(
-            sql: "UPSERT \(recordID.rawValue) CONTENT $content;",
-            bindings: ["content": payload]
+            sql: "UPSERT type::record($\(Self.recordBinding)) CONTENT $content;",
+            bindings: [Self.recordBinding: .recordID(recordID), "content": payload]
         )
         return try await self.query(query, session: session).first
     }
@@ -387,7 +391,7 @@ actor SurrealClientCore {
         as model: Model.Type,
         session: SessionID?
     ) async throws -> Model? {
-        let query = SurrealQuery<Model>(sql: "DELETE \(recordID.rawValue);")
+        let query = SurrealQuery<Model>(sql: "DELETE type::record($\(Self.recordBinding));", bindings: [Self.recordBinding: .recordID(recordID)])
         return try await self.query(query, session: session).first
     }
 

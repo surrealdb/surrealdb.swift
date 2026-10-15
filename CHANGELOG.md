@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Security
+- Fixed SurrealQL injection in generated queries. Predicate values (`Person.Fields.name == x`) are now sent as bound variables instead of being spliced into the statement; table and field names are always backtick-escaped; record-id operations (`select(recordID:)`, `create(recordID:)` and the rest) send the id as a bound value; and `SurrealValue.sqlLiteral` now escapes backslashes, so a value ending in `\` can no longer close its own string. `SurrealPredicate` gains a `bindings` dictionary, and `SurrealPredicateValue` now requires `surrealPredicateValue: SurrealValue` in place of `surrealPredicateSQL` (source-breaking for custom conformances).
+- Added `SurrealQL.escapeIdent(_:)`, `SurrealQL.escapeFieldPath(_:)` and `SurrealQL.quote(_:)` for callers writing their own SurrealQL.
 
 ## [1.0.0]
 ### Changed
