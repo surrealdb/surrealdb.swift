@@ -25,7 +25,11 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
     func connect() async throws {}
     func close() async {}
 
+    private var reconnectDuring: String?
+
     func failNext(_ method: String) { failingMethods.insert(method) }
+    /// Fires a reconnect while the next `method` request is in flight.
+    func reconnect(during method: String) { reconnectDuring = method }
     func holdResponses(for method: String) { heldMethods.insert(method) }
 
     func releaseResponses(for method: String) {
@@ -41,6 +45,11 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
     func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
         requests.append(.init(method: request.method, session: request.session, params: request.params))
+
+        if reconnectDuring == request.method {
+            reconnectDuring = nil
+            reconnectContinuation?.yield(())
+        }
 
         if heldMethods.contains(request.method) {
             await withCheckedContinuation { continuation in
@@ -315,4 +324,15 @@ func core_reconnectReplayReattachesForkedSessions() async throws {
     try await waitUntil { await engine.count(of: "use") == 2 }
     let lastUse = await engine.lastRequest("use")
     #expect(lastUse?.session == id.rawValue.uuidString)
+}
+
+@Test
+func core_reconnectDuringConnectSetupIsReplayed() async throws {
+    let engine = MockSessionEngine()
+    let core = SurrealClientCore(engine: engine, sessionContext: SessionContext(namespace: "ns", database: "db"))
+    // The socket drops and comes back while connect() is still applying the
+    // session; the new socket needs it too.
+    await engine.reconnect(during: "use")
+    try await core.connect()
+    try await waitUntil { await engine.count(of: "use") == 2 }
 }
