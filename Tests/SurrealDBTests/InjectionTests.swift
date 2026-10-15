@@ -107,3 +107,35 @@ func injection_typedPredicateValuesAreCast() {
     let plain = SurrealField<PlainModel, String>("name") == "x"
     #expect(plain.raw.hasPrefix("`name` = $_pv"))
 }
+
+@Test
+func injection_noneAndBytesAreWrittenInline() {
+    // JSON would send NONE as NULL and bytes as base64 text.
+    let missing = SurrealField<PlainModel, String?>("nickname") == nil
+    #expect(missing.raw == "`nickname` = NONE")
+    #expect(missing.bindings.isEmpty)
+    let bytes = SurrealField<PlainModel, SurrealValue>("blob") == .bytes(Data([0xff]))
+    #expect(bytes.raw == #"`blob` = encoding::base64::decode("/w==")"#)
+    #expect(bytes.bindings.isEmpty)
+}
+
+@Test
+func injection_explicitBindingsDontOverridePredicateOnes() {
+    let predicate = SurrealPredicate(raw: "a = $x", bindings: ["x": .int(1)])
+    let query = SurrealDSL.select(PlainModel.self, where: predicate, bindings: ["x": .int(2)])
+    #expect(query.bindings["x"] == .int(2))
+    let renamed = try! #require(query.bindings.first { $0.value == .int(1) }?.key)
+    #expect(query.sql.contains("a = $\(renamed)"))
+    // Same value: nothing to rename.
+    let same = SurrealDSL.select(PlainModel.self, where: predicate, bindings: ["x": .int(1)])
+    #expect(same.sql.contains("a = $x"))
+    #expect(same.bindings == ["x": .int(1)])
+}
+
+@Test
+func injection_renamingSkipsStringsAndComments() {
+    let sql = "b = $value AND note = '$value' AND q = \"$value\" AND `$value` = 1 -- $value\nAND c = $value2 AND d = $value /* $value */"
+    #expect(SurrealQL.renameParameter("value", to: "v9", in: sql)
+        == "b = $v9 AND note = '$value' AND q = \"$value\" AND `$value` = 1 -- $value\nAND c = $value2 AND d = $v9 /* $value */")
+    #expect(SurrealQL.renameParameter("x", to: "y", in: #"s = 'it\'s $x' AND $x"#) == #"s = 'it\'s $x' AND $y"#)
+}

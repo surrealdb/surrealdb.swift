@@ -179,6 +179,8 @@ func valueCoding_rejectsValuesThatWouldChangeOrTrap() {
     #expect(throws: DecodingError.self) { _ = try SurrealValue.double(.infinity).decode(Decimal.self) }
     #expect(throws: DecodingError.self) { _ = try SurrealValue.double(-.infinity).decode(Decimal.self) }
     #expect(throws: DecodingError.self) { _ = try SurrealValue.decimal("12.5oops").decode(Decimal.self) }
+    #expect(throws: DecodingError.self) { _ = try SurrealValue.decimal("1e1000").decode(Double.self) }
+    #expect(throws: DecodingError.self) { _ = try SurrealValue.decimal("-1e1000").decode(Float.self) }
     #expect(throws: DecodingError.self) { _ = try SurrealValue.object([:]).decode(StrictNil.self) }
     #expect((try? SurrealValue.double(.infinity).decode(Float.self)) == .infinity)
     #expect((try? SurrealValue.decimal("12.5").decode(Decimal.self)) == Decimal(string: "12.5"))
@@ -194,4 +196,18 @@ func valueCoding_datetimeSecondsNearInt64MinDoNotTrap() throws {
         return
     }
     #expect(date.timeIntervalSince1970 < -9e18)
+}
+
+@Test
+func valueCoding_outOfRangeDatetimesFailToEncode() throws {
+    // Decoded from the server's extreme, then written back.
+    let extreme = try CBORSurrealCodec.fromCBOR(.tagged(CBOR.Tag(rawValue: 12), .array([CBORSurrealCodec.cborInteger(.min), .unsignedInt(0)])))
+    for value in [extreme, .datetime(Date(timeIntervalSinceReferenceDate: 1e300)), .array([.object(["at": .datetime(.init(timeIntervalSinceReferenceDate: -1e19))])])] {
+        #expect(throws: EncodingError.self) {
+            _ = try CBORSurrealCodec.encode(RPCRequest(id: "1", method: "query", params: [value], session: nil, txn: nil))
+        }
+        _ = CBORSurrealCodec.toCBOR(value)  // clamps rather than trapping
+    }
+    let ordinary = Date(timeIntervalSince1970: 1_700_000_000.25)
+    _ = try CBORSurrealCodec.encode(RPCRequest(id: "1", method: "query", params: [.datetime(ordinary)], session: nil, txn: nil))
 }

@@ -65,7 +65,9 @@ public enum SurrealQL {
 
     /// `$name`, cast to the value's SurrealDB type where the JSON wire
     /// format would send it as a plain string (datetimes, UUIDs, decimals,
-    /// durations, record ids, bytes). The cast is a no-op over CBOR.
+    /// durations, record ids). The cast is a no-op over CBOR. NONE and bytes
+    /// can't be bound portably (JSON sends NULL and base64 text), so write
+    /// those inline with `sqlLiteral`.
     public static func typedParameter(_ name: String, for value: SurrealValue) -> String {
         switch value {
         case .datetime: return "<datetime>$\(name)"
@@ -73,18 +75,81 @@ public enum SurrealQL {
         case .decimal: return "<decimal>$\(name)"
         case .duration: return "<duration>$\(name)"
         case .recordID: return "<record>$\(name)"
-        case .bytes: return "<bytes>$\(name)"
         default: return "$\(name)"
         }
     }
 
     /// Replaces the parameter `$name` with `$newName` in SurrealQL text,
-    /// leaving longer names that start with `name` alone.
+    /// leaving longer names that start with `name`, and anything inside
+    /// strings, quoted identifiers and comments, alone.
     public static func renameParameter(_ name: String, to newName: String, in sql: String) -> String {
-        let pattern = "\\$" + NSRegularExpression.escapedPattern(for: name) + "(?![A-Za-z0-9_])"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return sql }
-        let range = NSRange(sql.startIndex..., in: sql)
-        return regex.stringByReplacingMatches(in: sql, range: range, withTemplate: NSRegularExpression.escapedTemplate(for: "$" + newName))
+        let chars = Array(sql)
+        let target = Array(name)
+        var out = ""
+        var i = 0
+        func isIdentChar(_ c: Character) -> Bool {
+            c == "_" || (c.isASCII && (c.isLetter || c.isNumber))
+        }
+        /// Copies a quoted run that starts at `i` and ends at `close`,
+        /// honouring backslash escapes.
+        func copyQuoted(close: Character) {
+            out.append(chars[i])
+            i += 1
+            while i < chars.count {
+                let c = chars[i]
+                out.append(c)
+                i += 1
+                if c == "\\", i < chars.count {
+                    out.append(chars[i])
+                    i += 1
+                } else if c == close {
+                    return
+                }
+            }
+        }
+        /// Copies from `i` up to and including `end`, or to the end.
+        func copyThrough(_ end: [Character]) {
+            while i < chars.count {
+                if Array(chars[i..<min(i + end.count, chars.count)]) == end {
+                    out.append(contentsOf: end)
+                    i += end.count
+                    return
+                }
+                out.append(chars[i])
+                i += 1
+            }
+        }
+        while i < chars.count {
+            let c = chars[i]
+            let next: Character? = i + 1 < chars.count ? chars[i + 1] : nil
+            switch c {
+            case "'", "\"", "`":
+                copyQuoted(close: c)
+            case "⟨":
+                copyQuoted(close: "⟩")
+            case "#":
+                copyThrough(["\n"])
+            case "-" where next == "-", "/" where next == "/":
+                copyThrough(["\n"])
+            case "/" where next == "*":
+                copyThrough(["*", "/"])
+            case "$":
+                let start = i + 1
+                let end = start + target.count
+                if end <= chars.count, Array(chars[start..<end]) == target,
+                   end == chars.count || !isIdentChar(chars[end]) {
+                    out.append("$" + newName)
+                    i = end
+                } else {
+                    out.append(c)
+                    i += 1
+                }
+            default:
+                out.append(c)
+                i += 1
+            }
+        }
+        return out
     }
 }
 
