@@ -175,3 +175,63 @@ func integration_withTransactionRollsBackWhenCancelledBeforeCommit() async throw
 private final class Captured: @unchecked Sendable {
     var tx: SurrealInteractiveTransaction?
 }
+
+/// A WebSocket-like engine that holds `commit` replies and, like the real
+/// engine, throws `CancellationError` when a waiting caller is cancelled.
+private actor HeldCommitEngine: LiveRPCEngine, SessionCapableRPCEngine {
+    private var held: [CheckedContinuation<Void, Error>] = []
+    private(set) var methods: [String] = []
+
+    func connect() async throws {}
+    func close() async {}
+
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        methods.append(request.method)
+        switch request.method {
+        case "begin":
+            return RPCResponseEnvelope(id: request.id, action: nil, result: .uuid(UUID()), error: nil)
+        case "commit":
+            // The server has the commit; only its reply is outstanding.
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { held.append($0) }
+            } onCancel: {
+                Task { await self.cancelHeld() }
+            }
+        default:
+            break
+        }
+        return RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
+    }
+
+    private func cancelHeld() {
+        held.forEach { $0.resume(throwing: CancellationError()) }
+        held = []
+    }
+
+    func release() {
+        held.forEach { $0.resume() }
+        held = []
+    }
+
+    func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> { AsyncStream { $0.finish() } }
+    func closeLiveStream(for queryID: UUID) async {}
+    func reconnectEvents() -> AsyncStream<Void> { AsyncStream { _ in } }
+}
+
+@Test
+func withTransaction_aCommitInFlightOutlivesCancellation() async throws {
+    let engine = HeldCommitEngine()
+    let core = SurrealClientCore(engine: engine)
+    try await core.connect()
+
+    let work = Task { try await core.withTransaction(session: nil) { _ in 42 } }
+    #expect(await eventually { await engine.methods.contains("commit") })
+
+    // Cancelled after the commit was sent: it may already be permanent, so
+    // the caller has to hear how it ended rather than a CancellationError.
+    work.cancel()
+    try await Task.sleep(nanoseconds: 100_000_000)
+    await engine.release()
+    #expect(try await work.value == 42)
+    #expect(await engine.methods.contains("cancel") == false)
+}
