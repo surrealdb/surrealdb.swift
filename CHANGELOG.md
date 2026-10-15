@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `info()` and `info(as:)` return the signed-in record user.
 - `refresh(_:)` and `revoke(_:)` for record-access token pairs, and `authenticate(_: AuthTokens)`, which refreshes the pair when the access token has expired and returns the pair to keep. `AuthTokens.accessExpiry` reads the JWT's expiry, and `SurrealError.isTokenExpired` recognises an expired token over either transport.
 - `reset()` clears the session's namespace, database, authentication and variables.
+- Interactive transactions over WebSocket: `beginTransaction()` returns a `SurrealInteractiveTransaction` whose `query`, `queryRaw` and CRUD calls run inside a transaction held open on the server, until `commit()` or `cancel()`. `withTransaction { tx in ... }` commits on return and cancels on throw. Available on clients and sessions.
 
 ### Security
 - Fixed SurrealQL injection in generated queries. Predicate values (`Person.Fields.name == x`) are now sent as bound variables instead of being spliced into the statement; table and field names are always backtick-escaped; record-id operations (`select(recordID:)`, `create(recordID:)` and the rest) send the id as a bound value; and `SurrealValue.sqlLiteral` now escapes backslashes, so a value ending in `\` can no longer close its own string. `SurrealPredicate` gains a `bindings` dictionary, and `SurrealPredicateValue` now requires `surrealPredicateValue: SurrealValue` in place of `surrealPredicateSQL` (source-breaking for custom conformances).

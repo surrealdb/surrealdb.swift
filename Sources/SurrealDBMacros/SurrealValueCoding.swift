@@ -711,7 +711,7 @@ final class SurrealValueEncoder: Encoder {
 
 extension SurrealValue {
     /// A short name for the value's type, for error messages.
-    var kindName: String {
+    package var kindName: String {
         switch self {
         case .none: "NONE"
         case .null: "NULL"

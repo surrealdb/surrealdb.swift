@@ -142,6 +142,22 @@ public struct SurrealSession: SurrealLiveQueryable {
         try await core.transaction(build, session: id)
     }
 
+    /// Opens an interactive transaction: statements sent through the returned
+    /// handle run inside it until you call `commit()` or `cancel()`.
+    /// WebSocket only; throws `SurrealError.unsupportedFeature` over HTTP.
+    public func beginTransaction() async throws -> SurrealInteractiveTransaction {
+        let txn = try await core.beginTransaction(session: id)
+        return SurrealInteractiveTransaction(core: core, session: id, id: txn)
+    }
+
+    /// Runs `body` in an interactive transaction, committing it if `body`
+    /// returns and cancelling it if `body` throws.
+    public func withTransaction<T: Sendable>(
+        _ body: @Sendable (SurrealInteractiveTransaction) async throws -> T
+    ) async throws -> T {
+        try await core.withTransaction(session: id, body)
+    }
+
     public func select<Model: SurrealModel & Decodable & Sendable>(
         _ model: Model.Type,
         where predicate: SurrealPredicate? = nil,

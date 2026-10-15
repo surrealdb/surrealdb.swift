@@ -393,7 +393,7 @@ actor SurrealClientCore {
         setSessionContext(for: session) { $0 = SessionContext() }
     }
 
-    func queryRaw(_ sql: String, bindings: [String: SurrealValue], session: SessionID?) async throws -> [RPCQueryResult] {
+    func queryRaw(_ sql: String, bindings: [String: SurrealValue], session: SessionID?, txn: UUID? = nil) async throws -> [RPCQueryResult] {
         let context = try sessionContext(for: session)
         var mergedBindings = serverKeepsState ? [:] : context.variables
         for (key, value) in bindings {
@@ -406,7 +406,8 @@ actor SurrealClientCore {
                 .string(sql),
                 .object(mergedBindings),
             ],
-            session: session
+            session: session,
+            txn: txn
         )
 
         return try RPCWire.decodeQueryResults(from: response)
@@ -422,8 +423,8 @@ actor SurrealClientCore {
         return try await queryRaw(sql, bindings: bindings, session: session)
     }
 
-    func query<T: Decodable & Sendable>(_ query: SurrealQuery<T>, session: SessionID?) async throws -> [T] {
-        let results = try await queryRaw(query.sql, bindings: query.bindings, session: session)
+    func query<T: Decodable & Sendable>(_ query: SurrealQuery<T>, session: SessionID?, txn: UUID? = nil) async throws -> [T] {
+        let results = try await queryRaw(query.sql, bindings: query.bindings, session: session, txn: txn)
         return try decodeQueryResults(results, as: T.self)
     }
 
@@ -432,16 +433,17 @@ actor SurrealClientCore {
         where predicate: SurrealPredicate?,
         limit: Int?,
         start: Int?,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> [Model] {
         let query = SurrealDSL.select(model, where: predicate, limit: limit, start: start)
-        return try await self.query(query, session: session)
+        return try await self.query(query, session: session, txn: txn)
     }
 
-    func create<Model: SurrealModel & Codable & Sendable>(_ value: Model, session: SessionID?) async throws -> [Model] {
+    func create<Model: SurrealModel & Codable & Sendable>(_ value: Model, session: SessionID?, txn: UUID? = nil) async throws -> [Model] {
         let content = try SurrealValue.fromEncodable(value)
         let query = SurrealDSL.create(Model.self, bindings: ["content": content])
-        return try await self.query(query, session: session)
+        return try await self.query(query, session: session, txn: txn)
     }
 
     /// Record ids are always sent as bound values, never spliced into the
@@ -451,103 +453,157 @@ actor SurrealClientCore {
     func select<Model: SurrealModel & Decodable & Sendable>(
         recordID: SurrealRecordID,
         as model: Model.Type,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> Model? {
         let query = SurrealQuery<Model>(sql: "SELECT * FROM type::record($\(Self.recordBinding));", bindings: [Self.recordBinding: .recordID(recordID)])
-        return try await self.query(query, session: session).first
+        return try await self.query(query, session: session, txn: txn).first
     }
 
     func create<Model: SurrealModel & Codable & Sendable>(
         recordID: SurrealRecordID,
         content: Model,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> Model? {
         let payload = try SurrealValue.fromEncodable(content)
         let query = SurrealQuery<Model>(
             sql: "CREATE type::record($\(Self.recordBinding)) CONTENT $content;",
             bindings: [Self.recordBinding: .recordID(recordID), "content": payload]
         )
-        return try await self.query(query, session: session).first
+        return try await self.query(query, session: session, txn: txn).first
     }
 
     func update<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
         where predicate: SurrealPredicate?,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> [Model] {
         let payload = try SurrealValue.fromEncodable(content)
         let query = SurrealDSL.update(model, where: predicate, bindings: ["content": payload])
-        return try await self.query(query, session: session)
+        return try await self.query(query, session: session, txn: txn)
     }
 
     func upsert<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
         where predicate: SurrealPredicate?,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> [Model] {
         let payload = try SurrealValue.fromEncodable(content)
         // A table-wide UPSERT with no WHERE inserts one new record rather
         // than touching the existing ones; `WHERE true` updates them all.
         let query = SurrealDSL.upsert(model, where: predicate ?? SurrealPredicate(raw: "true"), bindings: ["content": payload])
-        return try await self.query(query, session: session)
+        return try await self.query(query, session: session, txn: txn)
     }
 
     func delete<Model: SurrealModel & Decodable & Sendable>(
         _ model: Model.Type,
         where predicate: SurrealPredicate?,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> [Model] {
         let query = SurrealDSL.delete(model, where: predicate)
-        return try await self.query(query, session: session)
+        return try await self.query(query, session: session, txn: txn)
     }
 
     func update<Model: SurrealModel & Codable & Sendable>(
         recordID: SurrealRecordID,
         content: Model,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> Model? {
         let payload = try SurrealValue.fromEncodable(content)
         let query = SurrealQuery<Model>(
             sql: "UPDATE type::record($\(Self.recordBinding)) CONTENT $content;",
             bindings: [Self.recordBinding: .recordID(recordID), "content": payload]
         )
-        return try await self.query(query, session: session).first
+        return try await self.query(query, session: session, txn: txn).first
     }
 
     func upsert<Model: SurrealModel & Codable & Sendable>(
         recordID: SurrealRecordID,
         content: Model,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> Model? {
         let payload = try SurrealValue.fromEncodable(content)
         let query = SurrealQuery<Model>(
             sql: "UPSERT type::record($\(Self.recordBinding)) CONTENT $content;",
             bindings: [Self.recordBinding: .recordID(recordID), "content": payload]
         )
-        return try await self.query(query, session: session).first
+        return try await self.query(query, session: session, txn: txn).first
     }
 
     func delete<Model: SurrealModel & Decodable & Sendable>(
         recordID: SurrealRecordID,
         as model: Model.Type,
-        session: SessionID?
+        session: SessionID?,
+        txn: UUID? = nil
     ) async throws -> Model? {
         let query = SurrealQuery<Model>(sql: "DELETE type::record($\(Self.recordBinding));", bindings: [Self.recordBinding: .recordID(recordID)])
-        return try await self.query(query, session: session).first
+        return try await self.query(query, session: session, txn: txn).first
+    }
+
+    /// Opens an interactive transaction (`begin`) and returns its id.
+    /// Statements sent with that id in `txn` run inside it until `commit` or
+    /// `cancel`. The server only allows this over WebSocket.
+    func beginTransaction(session: SessionID?) async throws -> UUID {
+        _ = try sessionContext(for: session)
+        guard serverKeepsState else {
+            throw SurrealError.unsupportedFeature(
+                "Interactive transactions need a WebSocket connection. Over HTTP, use transaction { } to send the statements as one BEGIN ... COMMIT query."
+            )
+        }
+        // Sent from a task of its own: if the caller is cancelled after the
+        // server has opened the transaction, its id still comes back, and the
+        // transaction is cancelled rather than left open. (A timeout resets
+        // the socket, which ends every transaction on it.)
+        let response = try await Task { try await self.rpc("begin", session: session) }.value
+        var opened: UUID?
+        switch response {
+        case .uuid(let id):
+            opened = id
+        case .string(let text):
+            opened = UUID(uuidString: text)
+        default:
+            break
+        }
+        guard let id = opened else {
+            throw SurrealError.invalidResponse("Expected a transaction id from begin, got \(response.kindName).")
+        }
+        if Task.isCancelled {
+            _ = await Task { try? await self.rpc("cancel", params: [.uuid(id)], session: session) }.value
+            throw CancellationError()
+        }
+        return id
+    }
+
+    func commitTransaction(_ id: UUID, session: SessionID?) async throws {
+        try Task.checkCancellation()
+        // Once sent, a commit can't be called back. Wait for its reply from a
+        // task of its own, so cancelling the caller can't report a failure
+        // for writes that were made permanent.
+        _ = try await Task { try await self.rpc("commit", params: [.uuid(id)], session: session) }.value
+    }
+
+    func cancelTransaction(_ id: UUID, session: SessionID?) async throws {
+        _ = try await rpc("cancel", params: [.uuid(id)], session: session)
     }
 
     func kill(liveQueryID: UUID, session: SessionID?) async throws {
         _ = try await rpc("kill", params: [.uuid(liveQueryID)], session: session)
     }
 
-    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, anonymous: Bool = false) async throws -> SurrealValue {
+    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil, anonymous: Bool = false) async throws -> SurrealValue {
         if let activeReplay {
             await activeReplay.value
         }
 
-        return try await performRPC(method, params: params, session: session, anonymous: anonymous)
+        return try await performRPC(method, params: params, session: session, txn: txn, anonymous: anonymous)
     }
 
     /// Ungated variant of `rpc`. The reconnect-replay path must use this
@@ -556,7 +612,7 @@ actor SurrealClientCore {
     /// replay task — deadlocking the whole client.
     /// `anonymous` leaves the stored access token off this one request (the
     /// HTTP engine sends it as a Bearer header).
-    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, anonymous: Bool = false) async throws -> SurrealValue {
+    private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil, anonymous: Bool = false) async throws -> SurrealValue {
         var context = try sessionContext(for: session)
         if anonymous {
             context.accessToken = nil
@@ -566,7 +622,7 @@ actor SurrealClientCore {
             method: method,
             params: params,
             session: session?.rawValue.uuidString,
-            txn: nil
+            txn: txn?.uuidString.lowercased()
         )
 
         let envelope = try await engine.send(request, session: context)
