@@ -254,7 +254,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .int(let value):
             return "\(value)"
         case .double(let value):
-            if value.isNaN { return "math::nan" }
+            if value.isNaN { return "NaN" }
             if value.isInfinite { return value > 0 ? "math::inf" : "math::neg_inf" }
             return "\(value)f"
         case .string(let value):
