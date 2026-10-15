@@ -14,6 +14,16 @@ struct RPCResponseEnvelope: Sendable {
     let action: String?
     let result: SurrealValue?
     let error: RPCErrorObject?
+    /// The affected record, on a live notification sent at the top level.
+    let record: SurrealValue?
+
+    init(id: String?, action: String?, result: SurrealValue?, error: RPCErrorObject?, record: SurrealValue? = nil) {
+        self.id = id
+        self.action = action
+        self.result = result
+        self.error = error
+        self.record = record
+    }
 }
 
 public struct RPCErrorCause: Sendable, Codable {
@@ -102,7 +112,7 @@ enum CBORSurrealCodec {
             error = try decodeRPCError(from: rawError)
         }
 
-        return RPCResponseEnvelope(id: id, action: action, result: result, error: error)
+        return RPCResponseEnvelope(id: id, action: action, result: result, error: error, record: map[string: "record"])
     }
 
     static func toCBOR(_ value: SurrealValue) -> CBOR {
