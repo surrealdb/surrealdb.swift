@@ -274,6 +274,12 @@ struct SurrealValueDecoder: Decoder {
                 throw mismatch(SurrealRecordID.self, value, codingPath)
             }
             return SurrealRecordID(table: table, id: id)
+        case .string(let text):
+            // The JSON wire format sends record ids as text.
+            guard let id = SurrealRecordID(parsing: text) else {
+                throw mismatch(SurrealRecordID.self, value, codingPath)
+            }
+            return id
         default:
             throw mismatch(SurrealRecordID.self, value, codingPath)
         }

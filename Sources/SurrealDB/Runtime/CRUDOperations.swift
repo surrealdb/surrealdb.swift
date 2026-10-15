@@ -12,7 +12,13 @@ extension SurrealClientCore {
     /// which UPDATE and RELATE won't take as targets.
     private static func target(_ name: String, for value: SurrealValue) -> String {
         switch value {
-        case .recordID:
+        case .recordID(let id):
+            // A range can't be bound portably: JSON sends a record id as
+            // text and type::record drops the range. Its literal is built
+            // from escaped parts, so write it inline.
+            if case .range = id.id {
+                return value.sqlLiteral
+            }
             return "type::record($\(name))"
         case .table:
             return "type::table($\(name))"
@@ -39,9 +45,13 @@ extension SurrealClientCore {
         txn: UUID? = nil
     ) async throws -> [Model] {
         let content = SurrealValue.array(try values.map { try SurrealValue.fromEncodable($0) })
+        // Edges' in/out arrive as text over JSON; relations need records.
+        let data = relation
+            ? "array::map($\(Self.data), |$e| object::extend($e, { in: type::record($e.in), out: type::record($e.out) }))"
+            : "$\(Self.data)"
         let statement = relation ? "INSERT RELATION INTO" : "INSERT INTO"
         return try await run(
-            "\(statement) $\(Self.target) $\(Self.data);",
+            "\(statement) $\(Self.target) \(data);",
             [Self.target: .table(Model.surrealTable), Self.data: content],
             session: session,
             txn: txn
@@ -112,7 +122,7 @@ extension SurrealClientCore {
         session: SessionID?,
         txn: UUID? = nil
     ) async throws -> [Model] {
-        try await run("SELECT * FROM $\(Self.target);", [Self.target: range.surrealValue], session: session, txn: txn)
+        try await run("SELECT * FROM \(Self.target(Self.target, for: range.surrealValue));", [Self.target: range.surrealValue], session: session, txn: txn)
     }
 
     func delete<Model: Decodable & Sendable>(
@@ -121,6 +131,6 @@ extension SurrealClientCore {
         session: SessionID?,
         txn: UUID? = nil
     ) async throws -> [Model] {
-        try await run("DELETE $\(Self.target) RETURN BEFORE;", [Self.target: range.surrealValue], session: session, txn: txn)
+        try await run("DELETE \(Self.target(Self.target, for: range.surrealValue)) RETURN BEFORE;", [Self.target: range.surrealValue], session: session, txn: txn)
     }
 }
