@@ -202,7 +202,8 @@ func valueCoding_datetimeSecondsNearInt64MinDoNotTrap() throws {
 func valueCoding_outOfRangeDatetimesFailToEncode() throws {
     // Decoded from the server's extreme, then written back.
     let extreme = try CBORSurrealCodec.fromCBOR(.tagged(CBOR.Tag(rawValue: 12), .array([CBORSurrealCodec.cborInteger(.min), .unsignedInt(0)])))
-    for value in [extreme, .datetime(Date(timeIntervalSinceReferenceDate: 1e300)), .array([.object(["at": .datetime(.init(timeIntervalSinceReferenceDate: -1e19))])])] {
+    for value in [extreme, .datetime(Date(timeIntervalSinceReferenceDate: 1e300)), .array([.object(["at": .datetime(.init(timeIntervalSinceReferenceDate: -1e19))])]),
+                  .range(SurrealRange(begin: .included(.datetime(.init(timeIntervalSinceReferenceDate: 1e300))), end: .unbounded))] {
         #expect(throws: EncodingError.self) {
             _ = try CBORSurrealCodec.encode(RPCRequest(id: "1", method: "query", params: [value], session: nil, txn: nil))
         }
