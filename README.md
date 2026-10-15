@@ -585,7 +585,7 @@ for await event in stream {
 }
 ```
 
-Stop listening by ending the stream (cancel the task iterating it, or `break` out): the SDK kills the live query on the server. You can also kill it yourself with `client.kill(liveQueryID: event.queryID)`.
+To stop listening, cancel the task iterating the stream, or let go of every reference to the stream: either ends it, and the SDK then kills the live query on the server. `break` on its own isn't enough while something still holds the stream. You can also kill it yourself with `client.kill(liveQueryID: event.queryID)`.
 
 If the WebSocket drops and reconnects, the client re-issues every live query it started with `live(_:)` and keeps the same stream going. Notifications sent while the connection was down are lost, and the server gives the re-issued query a new id, so `event.queryID` changes. If the reconnect fails for good, the streams finish.
 

@@ -178,3 +178,88 @@ func integration_liveDiffSendsPatchOperations() async throws {
     #expect(changes.contains(.replace(path: "/n", value: .int(2))))
     #expect(changes.contains { if case .change(path: "/text", _) = $0 { return true } else { return false } })
 }
+
+/// A live-capable engine whose `query` calls can be made to fail as if the
+/// connection dropped again.
+private actor FlakyLiveEngine: LiveRPCEngine {
+    private var reconnectContinuation: AsyncStream<Void>.Continuation?
+    private var streams: [UUID: AsyncStream<LiveWireEvent>.Continuation] = [:]
+    private var queryFailures: [any Error] = []
+    private(set) var queries = 0
+    private(set) var closed: [UUID] = []
+    private(set) var moved: [UUID] = []
+
+    func connect() async throws {}
+    func close() async {}
+
+    func failNextQuery(with error: any Error) { queryFailures.append(error) }
+
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        guard request.method == "query" else {
+            return RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
+        }
+        queries += 1
+        if !queryFailures.isEmpty {
+            throw queryFailures.removeFirst()
+        }
+        let row: SurrealValue = .object(["status": .string("OK"), "time": .string("0ms"), "result": .uuid(UUID())])
+        return RPCResponseEnvelope(id: request.id, action: nil, result: .array([row]), error: nil)
+    }
+
+    func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> {
+        AsyncStream { self.streams[queryID] = $0 }
+    }
+
+    func closeLiveStream(for queryID: UUID) async {
+        closed.append(queryID)
+        streams.removeValue(forKey: queryID)?.finish()
+    }
+
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async {
+        moved.append(newID)
+        streams[newID] = streams.removeValue(forKey: oldID)
+    }
+
+    func reconnectEvents() -> AsyncStream<Void> {
+        AsyncStream { self.reconnectContinuation = $0 }
+    }
+
+    func fireReconnect() { reconnectContinuation?.yield(()) }
+    func hasSubscriber() -> Bool { reconnectContinuation != nil }
+}
+
+private func waitFor(_ condition: @escaping @Sendable () async -> Bool) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while ContinuousClock.now < deadline {
+        if await condition() { return }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    Issue.record("Timed out waiting for a condition")
+}
+
+@Test
+func core_resubscribeKeepsTheStreamWhenTheConnectionDropsAgain() async throws {
+    let engine = FlakyLiveEngine()
+    let core = SurrealClientCore(engine: engine)
+    try await core.connect()
+    try await waitFor { await engine.hasSubscriber() }
+    let stream = try await core.live(LiveQuery<SurrealValue>(sql: "LIVE SELECT * FROM note;"), session: nil)
+    _ = stream
+
+    // The re-issue fails because the new socket dropped too: keep the stream.
+    await engine.failNextQuery(with: SurrealError.connectionLost(cause: nil))
+    await engine.fireReconnect()
+    try await waitFor { await engine.queries == 2 }
+    try await Task.sleep(nanoseconds: 100_000_000)
+    #expect(await engine.closed.isEmpty)
+
+    // The next reconnect re-issues it.
+    await engine.fireReconnect()
+    try await waitFor { await engine.moved.count == 1 }
+    #expect(await engine.closed.isEmpty)
+
+    // The server refusing the query does end the stream.
+    await engine.failNextQuery(with: SurrealError.queryErrors([QueryErrorDetail(index: 0, message: "no", details: nil)]))
+    await engine.fireReconnect()
+    try await waitFor { await engine.closed.count == 1 }
+}

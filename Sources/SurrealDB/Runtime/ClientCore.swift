@@ -784,9 +784,17 @@ extension SurrealClientCore {
         guard let liveEngine = engine as? any LiveRPCEngine else { return }
         for (token, subscription) in liveSubscriptions {
             let oldID = subscription.serverID
-            guard let query = subscription.query,
-                  let newID = try? await registerLiveQuery(sql: query.sql, bindings: query.bindings, session: subscription.session, gated: false)
-            else {
+            let newID: UUID
+            do {
+                guard let query = subscription.query else {
+                    throw SurrealError.unsupportedFeature("liveOf streams can't be re-issued.")
+                }
+                newID = try await registerLiveQuery(sql: query.sql, bindings: query.bindings, session: subscription.session, gated: false)
+            } catch let error where Self.isTransportFailure(error) {
+                // The connection dropped again. Keep the stream: the next
+                // reconnect re-issues it.
+                continue
+            } catch {
                 liveSubscriptions.removeValue(forKey: token)
                 await liveEngine.closeLiveStream(for: oldID)
                 continue
@@ -798,6 +806,18 @@ extension SurrealClientCore {
             }
             liveSubscriptions[token]?.serverID = newID
             await liveEngine.moveLiveStream(from: oldID, to: newID)
+        }
+    }
+
+    /// Whether `error` means the request didn't get an answer, rather than
+    /// the server refusing it.
+    private static func isTransportFailure(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        switch error as? SurrealError {
+        case .connectionLost?, .timeout?, .notConnected?:
+            return true
+        default:
+            return false
         }
     }
 
