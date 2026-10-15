@@ -95,3 +95,46 @@ func integration_wsReconnectStopsAfterMaxAttempts() async throws {
     try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
     #expect(try await client.queryRaw("RETURN 1;").first?.result == .int(1))
 }
+
+@Test
+func integration_overlappingConnectsShareOneSocket() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+
+    let client = try SurrealClient(endpoint: "ws://127.0.0.1:\(proxy.port)", websocketOptions: .init(reconnectBaseDelay: 0.05))
+    defer { Task { await client.close() } }
+    async let first: Void = client.connect()
+    async let second: Void = client.connect()
+    _ = try await (first, second)
+
+    // One socket, not two with one leaked.
+    #expect(proxy.acceptedConnections == 1)
+    try await authenticateIfNeeded(client)
+    try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
+    #expect(try await client.queryRaw("RETURN 1;").first?.result == .int(1))
+}
+
+@Test
+func integration_connectTimesOutWhenHandshakeIsNeverAnswered() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+
+    // Nothing is forwarded, so the handshake is never answered.
+    let client = try SurrealClient(
+        endpoint: "ws://127.0.0.1:\(proxy.port)",
+        options: .init(requestTimeout: 0.5),
+        websocketOptions: .init(reconnectEnabled: false)
+    )
+    proxy.setStalled(true)
+    let started = Date()
+    await #expect(throws: SurrealError.self) {
+        try await client.connect()
+    }
+    #expect(Date().timeIntervalSince(started) < 5)
+}
