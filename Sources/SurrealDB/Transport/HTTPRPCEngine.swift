@@ -57,6 +57,8 @@ actor HTTPRPCEngine: RPCEngine {
             throw SurrealError.timeout
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
+        } catch let error as URLError {
+            throw SurrealError.connectionLost(cause: error)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {

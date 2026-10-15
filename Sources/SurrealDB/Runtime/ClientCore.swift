@@ -13,16 +13,20 @@ actor SurrealClientCore {
     /// Between a successful `connect()` and `close()`. The engines track
     /// this themselves; it's here for the raw HTTP routes, which bypass them.
     private(set) var isConnected = false
-    /// Bumped by `close()`, so a `connect()` it interrupted can tell.
+    /// Bumped by close(), so a connect() that resumes after one can tell
+    /// it was cut short.
     private var closeCount = 0
     private let checkServerVersion: Bool
+    let status: ConnectionStatusBroadcaster
 
     init(
         engine: any RPCEngine,
         sessionContext: SessionContext = .init(),
         http: HTTPEndpoints? = nil,
-        checkServerVersion: Bool = false
+        checkServerVersion: Bool = false,
+        status: ConnectionStatusBroadcaster = ConnectionStatusBroadcaster()
     ) {
+        self.status = status
         self.engine = engine
         self.rootSession = sessionContext
         self.http = http
@@ -39,14 +43,17 @@ actor SurrealClientCore {
         // Connected again only once this attempt succeeds.
         isConnected = false
         let closes = closeCount
-        try await engine.connect()
-
-        // Subscribe before anything else awaits: a reconnect during the
-        // version check or session setup below would otherwise be dropped,
-        // leaving the new socket without the session.
-        let reconnects = await (engine as? any LiveRPCEngine)?.reconnectEvents()
-
+        status.send(.connecting)
+        let liveEngine = engine as? any LiveRPCEngine
+        var reconnects: AsyncStream<Void>?
+        var connection: Int?
         do {
+            try await engine.connect()
+            connection = await liveEngine?.connectionIdentity()
+            // Subscribe before anything else awaits: a reconnect during the
+            // version check or session setup below would otherwise be
+            // dropped, leaving the new socket without the session.
+            reconnects = await liveEngine?.reconnectEvents()
             if checkServerVersion {
                 try ServerVersion.check(try await version())
             }
@@ -57,9 +64,11 @@ actor SurrealClientCore {
             }
         } catch {
             await engine.close()
+            status.send(.disconnected)
             throw error
         }
-        // close() ran while this was waiting on the server.
+        // close() ran while this call was suspended: it has closed the engine
+        // and reported .disconnected, so this attempt is over.
         guard closes == closeCount else {
             throw SurrealError.notConnected
         }
@@ -78,16 +87,38 @@ actor SurrealClientCore {
             await resubscribeLiveQueries()
         }
 
-        guard let reconnects else {
-            return
-        }
-
-        reconnectReplayTask?.cancel()
-        reconnectReplayTask = Task { [weak self] in
-            for await _ in reconnects {
-                guard let self else { return }
-                await self.beginReplay()
+        if let liveEngine, let reconnects {
+            reconnectReplayTask?.cancel()
+            reconnectReplayTask = Task { [weak self] in
+                for await _ in reconnects {
+                    guard let self else { return }
+                    let connection = await liveEngine.connectionIdentity()
+                    await self.beginReplay()
+                    // close() during the replay has already reported
+                    // .disconnected; don't override it.
+                    guard !Task.isCancelled, await self.isConnected else { return }
+                    // Nor a drop during the replay, which reported
+                    // .reconnecting; the next reconnect's replay reports
+                    // .connected.
+                    guard let connection else { continue }
+                    let status = self.status
+                    await liveEngine.ifConnectionIs(connection) { status.send(.connected) }
+                }
             }
+        }
+        // Likewise if close() ran during the replay just above.
+        guard closes == closeCount else {
+            throw SurrealError.notConnected
+        }
+        if let liveEngine {
+            // A drop since engine.connect() has reported .reconnecting (or
+            // .disconnected) already; the reconnect's replay reports
+            // .connected when there's a socket again.
+            guard let connection else { return }
+            let status = self.status
+            await liveEngine.ifConnectionIs(connection) { status.send(.connected) }
+        } else {
+            status.send(.connected)
         }
     }
 
@@ -97,6 +128,7 @@ actor SurrealClientCore {
         reconnectReplayTask?.cancel()
         reconnectReplayTask = nil
         await engine.close()
+        status.send(.disconnected)
     }
 
     // MARK: - Session state lookup/mutation
