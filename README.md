@@ -374,6 +374,9 @@ let updated = try await client.update(
     where: Person.Fields.name == "Ada"
 )
 
+// The predicate is required. To replace every record in the table, say so:
+let all = try await client.updateAll(Person.self, content: Person(id: nil, name: "Ada", age: 31))
+
 // Update a specific record
 let id = SurrealRecordID(table: "person", id: .string("ada"))
 let record: Person? = try await client.update(

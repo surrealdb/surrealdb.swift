@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `SurrealQL.escapeIdent(_:)`, `SurrealQL.escapeFieldPath(_:)` and `SurrealQL.quote(_:)` for callers writing their own SurrealQL.
 
 ### Fixed
+- `update(_:content:)` and `upsert(_:content:)` with no predicate replaced every record in the table with the same content. The `where:` argument is now required (source-breaking); the table-wide forms are `updateAll(_:content:)` and `upsertAll(_:content:)`.
 - An invalid UUID string (CBOR tag 9) silently decoded to a new random `UUID()`. It now throws `SurrealError.invalidResponse`, as do other malformed tags that used to decode to an invented value (`NULL`, `""`, `0`, an empty set). A malformed value inside a response no longer reads as a missing result.
 - `KILLED` live notifications were dropped because they carry no record, so a live stream whose query the server ended (`KILL`, `REMOVE TABLE`, lost access) stayed open forever. The stream now delivers a `.killed` event and finishes. `LiveEvent` gains a typed `record: SurrealRecordID?`; `recordID` is `""` for `.killed`.
 - WebSocket requests could hang forever: `requestTimeout` only applied to HTTP, and cancelling the calling task didn't stop the wait. Requests now throw `SurrealError.timeout` after `requestTimeout` and `CancellationError` as soon as the caller is cancelled, on both transports. The keepalive ping is bounded by the same timeout, so a peer that stops answering counts as a dropped connection.
