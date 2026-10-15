@@ -119,3 +119,35 @@ func integration_aTimedOutStateChangeResetsTheSocket() async throws {
         (try? await client.queryRaw("RETURN session::db();").first?.result) == .string(IntegrationEnv.database)
     })
 }
+
+@Test
+func integration_aCancelledStateChangeResetsTheSocket() async throws {
+    guard IntegrationEnv.canProxy else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+    let client = try SurrealClient(
+        endpoint: "ws://127.0.0.1:\(proxy.port)",
+        options: .init(requestTimeout: 60, pingInterval: 60),
+        websocketOptions: .init(reconnectBaseDelay: 0.05)
+    )
+    try await client.connect()
+    defer { Task { await client.close() } }
+    try await authenticateIfNeeded(client)
+    try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
+    let before = proxy.acceptedConnections
+
+    // A `use` cancelled before its reply might still be applied, so the
+    // client starts over on a new socket and replays the state it knows.
+    proxy.setStalled(true)
+    let use = Task { try await client.use(namespace: IntegrationEnv.namespace, database: "elsewhere") }
+    try await Task.sleep(nanoseconds: 200_000_000)
+    use.cancel()
+    await #expect(throws: CancellationError.self) { try await use.value }
+    proxy.setStalled(false)
+    #expect(await eventually { proxy.acceptedConnections > before })
+    #expect(await eventually {
+        (try? await client.queryRaw("RETURN session::db();").first?.result) == .string(IntegrationEnv.database)
+    })
+}

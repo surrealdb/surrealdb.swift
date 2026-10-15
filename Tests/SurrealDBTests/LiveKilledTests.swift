@@ -43,6 +43,27 @@ func live_decodesRecordFromNotification() throws {
 }
 
 @Test
+func live_topLevelNotificationKeepsItsRecord() throws {
+    // A projection like `LIVE SELECT name FROM ...` leaves the payload
+    // without an id; the envelope's own record field still has it.
+    let queryID = UUID()
+    let record = SurrealRecordID(table: "watched", id: .string("a"))
+    var map = CBOR.Map()
+    map[.utf8String("id")] = .utf8String(queryID.uuidString)
+    map[.utf8String("action")] = .utf8String("CREATE")
+    map[.utf8String("record")] = CBORSurrealCodec.toCBOR(.recordID(record))
+    map[.utf8String("result")] = CBORSurrealCodec.toCBOR(.object(["name": .string("x")]))
+    let cbor = try CBORSurrealCodec.decodeRPCEnvelope(try CBORSerialization.data(from: .map(map)))
+    let fromCBOR = try #require(RPCWire.decodeLiveEvent(from: cbor))
+    #expect(fromCBOR.record == .recordID(record))
+    #expect(fromCBOR.recordID == "watched:a")
+
+    let json = #"{"id":"\#(queryID.uuidString)","action":"CREATE","record":"watched:a","result":{"name":"x"}}"#
+    let fromJSON = try #require(RPCWire.decodeLiveEvent(from: try JSONRPCCodec.decodeRPCEnvelope(Data(json.utf8))))
+    #expect(fromJSON.recordID == "watched:a")
+}
+
+@Test
 func integration_liveStreamDeliversKilledAndFinishes() async throws {
     guard IntegrationEnv.enabled else { return }
 
