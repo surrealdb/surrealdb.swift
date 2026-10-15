@@ -338,10 +338,12 @@ func core_resubscribeKeepsTheStreamWhenTheConnectionDropsAgain() async throws {
     try await waitFor { await engine.closed.count == 1 }
 
     // So does a timeout: the socket may be up, with no reconnect to retry.
-    _ = try await core.live(LiveQuery<SurrealValue>(sql: "LIVE SELECT * FROM note;"), session: nil)
+    // Held, because dropping a stream closes its query too.
+    let second = try await core.live(LiveQuery<SurrealValue>(sql: "LIVE SELECT * FROM note;"), session: nil)
     await engine.failNextQuery(with: SurrealError.timeout)
     await engine.fireReconnect()
     try await waitFor { await engine.closed.count == 2 }
+    withExtendedLifetime((stream, second)) {}
 }
 
 @Test
