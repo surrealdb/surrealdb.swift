@@ -273,7 +273,7 @@ func integration_wsLiveQueries() async throws {
     try await authenticateIfNeeded(client)
     try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
 
-    let defineTable = try await client.queryRaw("DEFINE TABLE \(IntegrationLivePerson.surrealTable) SCHEMALESS;", bindings: [:])
+    let defineTable = try await client.queryRaw("DEFINE TABLE IF NOT EXISTS \(IntegrationLivePerson.surrealTable) SCHEMALESS;", bindings: [:])
     assertAllOK(defineTable)
 
     let recordKey = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")

@@ -51,7 +51,8 @@ start_docker() {
 
 start_local_surreal() {
   local surreal_bin
-  surreal_bin="$(command -v surreal || true)"
+  # SURREALDB_BIN pins the server binary (CI installs one per matrix entry).
+  surreal_bin="${SURREALDB_BIN:-$(command -v surreal || true)}"
   local install_dir="${PWD}/.build/surrealdb-bin"
 
   if [[ -z "$surreal_bin" ]]; then
@@ -93,8 +94,14 @@ fi
 
 wait_for_surreal
 
-swift test --filter integration_wsAuthQueryCrud
-swift test --filter integration_httpParity
-swift test --filter integration_wsFullCRUDQueries
-swift test --filter integration_wsFunctionAndGeoQueries
-swift test --filter integration_wsLiveQueries
+echo "Testing against $(curl -fsS "http://${SURREALDB_BIND_HOST}:${SURREALDB_PORT}/version")"
+
+# Create the namespace and database up front: tests run in parallel, and
+# racing to create them can hit a transaction conflict on a fresh server.
+curl -fsS -u "${SURREALDB_USER}:${SURREALDB_PASSWORD}" -H "Accept: application/json" \
+  --data-binary "DEFINE NAMESPACE IF NOT EXISTS ${SURREALDB_NAMESPACE}; USE NS ${SURREALDB_NAMESPACE}; DEFINE DATABASE IF NOT EXISTS ${SURREALDB_NAME};" \
+  "http://${SURREALDB_BIND_HOST}:${SURREALDB_PORT}/sql" >/dev/null
+
+# Every test whose name starts with integration_ (they skip themselves
+# unless SURREALDB_RUN_INTEGRATION=1).
+swift test --filter integration_
