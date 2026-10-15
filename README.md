@@ -743,6 +743,7 @@ let v: SurrealValue = .object(["name": .string("Ada"), "age": .int(30)])
 let v: SurrealValue = .uuid(UUID())
 let v: SurrealValue = .datetime(Date())
 let v: SurrealValue = .recordID(SurrealRecordID(table: "person", id: .string("ada")))
+let v: SurrealValue = .file(SurrealFileRef(bucket: "docs", key: "/report.pdf"))  // f"docs:/report.pdf"
 
 // Convert any Encodable to SurrealValue
 let value = try SurrealValue.fromEncodable(myStruct)
@@ -750,6 +751,8 @@ let value = try SurrealValue.fromEncodable(myStruct)
 // Decode a SurrealValue back to a Swift type
 let person = try value.decode(Person.self)
 ```
+
+`SurrealFileRef` fields in your models encode and decode as file values. Files are an experimental server feature: start the server with `--allow-experimental files` (or `SURREAL_CAPS_ALLOW_EXPERIMENTAL=files`) and define a bucket with `DEFINE BUCKET`.
 
 ---
 

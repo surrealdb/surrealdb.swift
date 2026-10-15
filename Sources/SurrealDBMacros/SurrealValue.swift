@@ -42,6 +42,23 @@ public struct SurrealRange: Sendable, Hashable, Codable {
     }
 }
 
+/// A reference to a file in a bucket (`f"bucket:/key"`). The bucket is
+/// defined with `DEFINE BUCKET`; files are an experimental server feature.
+public struct SurrealFileRef: Sendable, Hashable, Codable {
+    public let bucket: String
+    public let key: String
+
+    public init(bucket: String, key: String) {
+        self.bucket = bucket
+        self.key = key
+    }
+
+    /// `bucket:key`, as inside the `f"..."` literal.
+    public var rawValue: String {
+        "\(bucket):\(key)"
+    }
+}
+
 public enum SurrealGeometry: Sendable, Hashable, Codable {
     case point([Double])
     case line([[Double]])
@@ -71,6 +88,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
     case range(SurrealRange)
     case set([SurrealValue])
     case geometry(SurrealGeometry)
+    case file(SurrealFileRef)
 
     case array([SurrealValue])
     case object([String: SurrealValue])
@@ -148,6 +166,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             try container.encode(value)
         case .geometry(let value):
             try container.encode(String(describing: value))
+        case .file(let value):
+            try container.encode(value.rawValue)
         case .array(let value):
             try container.encode(value)
         case .object(let value):
@@ -221,6 +241,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return try value.map { try $0.jsonObject() }
         case .geometry(let value):
             return ["geometry": String(describing: value)]
+        case .file(let value):
+            return value.rawValue
         case .array(let value):
             return try value.map { try $0.jsonObject() }
         case .object(let value):
@@ -267,6 +289,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .geometry:
             return "<geometry>"
+        case .file(let value):
+            return "f\(SurrealQL.quote(value.rawValue))"
         case .array(let value):
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .object(let value):

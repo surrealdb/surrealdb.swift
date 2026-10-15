@@ -56,6 +56,7 @@ enum CBORSurrealCodec {
     static let tagStringDuration = CBOR.Tag(rawValue: 13)
     static let tagCustomDuration = CBOR.Tag(rawValue: 14)
     static let tagRange = CBOR.Tag(rawValue: 49)
+    static let tagFile = CBOR.Tag(rawValue: 55)
     static let tagBoundIncluded = CBOR.Tag(rawValue: 50)
     static let tagBoundExcluded = CBOR.Tag(rawValue: 51)
     static let tagSet = CBOR.Tag(rawValue: 56)
@@ -170,6 +171,8 @@ enum CBORSurrealCodec {
             ]))
         case .set(let value):
             return .tagged(tagSet, .array(value.map(toCBOR(_:))))
+        case .file(let value):
+            return .tagged(tagFile, .array([.utf8String(value.bucket), .utf8String(value.key)]))
         case .geometry(let value):
             switch value {
             case .point(let point):
@@ -354,6 +357,13 @@ enum CBORSurrealCodec {
                 throw SurrealError.invalidResponse("Expected [seconds, nanoseconds] for a datetime (tag 12).")
             }
             return .datetime(date(seconds: seconds, nanoseconds: nanos))
+        case tagFile:
+            guard case .array(let parts) = value, parts.count == 2,
+                  case .utf8String(let bucket) = parts[0], case .utf8String(let key) = parts[1]
+            else {
+                throw SurrealError.invalidResponse("Expected [bucket, key] strings for a file (tag 55).")
+            }
+            return .file(SurrealFileRef(bucket: bucket, key: key))
         case tagRange:
             if case .array(let bounds) = value, bounds.count == 2 {
                 let begin = try decodeBound(from: bounds[0])
