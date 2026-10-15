@@ -243,7 +243,11 @@ extension SurrealClientCore {
         do {
             result = try await body(transaction)
         } catch {
-            try? await transaction.cancel()
+            // If `body` threw because this task was cancelled, a cancel sent
+            // from here would be refused before it left the client, leaving
+            // the transaction open on the server. Send it from a task of its
+            // own.
+            await Task.detached { try? await transaction.cancel() }.value
             throw error
         }
         try await transaction.commit()

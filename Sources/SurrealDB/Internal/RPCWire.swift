@@ -480,7 +480,11 @@ enum CBORSurrealCodec {
     }
 
     static func date(seconds: Int64, nanoseconds: UInt32) -> Date {
-        Date(timeIntervalSinceReferenceDate: Double(seconds - unixToReferenceDate) + Double(nanoseconds) / 1_000_000_000)
+        // Seconds near Int64.min would overflow the subtraction; that far out
+        // a Double can't tell the difference anyway.
+        let (sinceReference, overflow) = seconds.subtractingReportingOverflow(unixToReferenceDate)
+        let whole = overflow ? Double(seconds) - Double(unixToReferenceDate) : Double(sinceReference)
+        return Date(timeIntervalSinceReferenceDate: whole + Double(nanoseconds) / 1_000_000_000)
     }
 
     static func cborInteger(_ value: Int64) -> CBOR {

@@ -1,4 +1,5 @@
 import Foundation
+import PotentCBOR
 import Testing
 @testable import SurrealDB
 
@@ -7,6 +8,78 @@ private struct Greeting: Decodable, Sendable, Equatable {
     let q: [String: String]
     let got: [String: Int]
     let h: String
+}
+
+/// Answers every request with a 200 whose body is `ImportStub.body`, the way
+/// servers before 3.3.1 answer `/import` even when statements failed.
+private final class ImportStub: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var body = Data()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+@Test
+func import_failedStatementsInA200AreReported() async throws {
+    func row(_ status: String, _ result: SurrealValue) -> SurrealValue {
+        .object(["status": .string(status), "time": .string("1ms"), "result": result])
+    }
+    ImportStub.body = try CBORSerialization.data(from: CBORSurrealCodec.toCBOR(.array([
+        row("OK", .array([])),
+        row("ERR", .string("Database record `keep:a` already exists")),
+    ])))
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [ImportStub.self]
+    let endpoints = HTTPEndpoints(
+        rpcURL: URL(string: "http://127.0.0.1:1/rpc")!,
+        timeout: 5,
+        urlSession: URLSession(configuration: configuration)
+    )
+
+    do {
+        try await endpoints.importSQL("OPTION IMPORT; CREATE keep:z; CREATE keep:a;", session: SessionContext())
+        Issue.record("Expected importFailed")
+    } catch SurrealError.importFailed(let failures) {
+        #expect(failures.map(\.index) == [1])
+        #expect(failures.first?.message.contains("keep:a") == true)
+    }
+
+    // A 200 with an empty result list is a clean import.
+    ImportStub.body = try CBORSerialization.data(from: CBORSurrealCodec.toCBOR(.array([])))
+    try await endpoints.importSQL("OPTION IMPORT;", session: SessionContext())
+}
+
+@Test
+func importExport_requireAConnectedClient() async throws {
+    let client = try SurrealClient(endpoint: "http://127.0.0.1:1")
+    do {
+        try await client.import("OPTION IMPORT;")
+        Issue.record("Expected notConnected before connect()")
+    } catch SurrealError.notConnected {}
+    do {
+        _ = try await client.export()
+        Issue.record("Expected notConnected before connect()")
+    } catch SurrealError.notConnected {}
+}
+
+@Test
+func integration_importAfterCloseThrowsNotConnected() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    let client = try await integrationClient(httpEndpoint())
+    await client.close()
+    do {
+        _ = try await client.export()
+        Issue.record("Expected notConnected after close()")
+    } catch SurrealError.notConnected {}
 }
 
 @Test
