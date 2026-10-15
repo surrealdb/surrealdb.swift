@@ -85,6 +85,8 @@ func recordID_parsesTheServersTextForm() {
     #expect(SurrealRecordID(parsing: "t:u'\(uuid.uuidString.lowercased())'") == SurrealRecordID(table: "t", id: .uuid(uuid)))
     #expect(SurrealRecordID(parsing: "t:[1, 'a']") == nil)
     #expect(SurrealRecordID(parsing: "t:{ a: 1 }") == nil)
+    #expect(SurrealRecordID(parsing: "outer:person:alice") == nil)
+    #expect(SurrealRecordID(parsing: "t:⟨a:b⟩") == SurrealRecordID(table: "t", id: .string("a:b")))
     // Round-trips what rawValue renders.
     for id in [SurrealRecordID(table: "t", id: .string("a b")), SurrealRecordID(table: "t", id: .int(-5)), SurrealRecordID(table: "t", id: .string("007")), SurrealRecordID(table: "t", id: .uuid(uuid))] {
         #expect(SurrealRecordID(parsing: id.rawValue) == id)

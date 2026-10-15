@@ -19,11 +19,14 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
     /// Parses the text form the server sends record ids in over JSON
     /// (`person:alice`, ``person:`123` ``, `person:⟨a b⟩`, `person:42`).
     /// Integer keys become `.int`, `u'…'` keys `.uuid`, and identifier keys
-    /// `.string`. `nil` without a `table:`, and for array and object keys,
-    /// which this doesn't parse: a guess would name a different record.
+    /// `.string`. `nil` without a `table:`, and for array, object and
+    /// record-id keys, which this doesn't parse.
     public init?(parsing text: String) {
         guard let (table, rest) = Self.splitTable(text), !rest.isEmpty else { return nil }
-        if rest.first == "[" || rest.first == "{" {
+        // Array and object keys, and keys that are themselves record ids
+        // (`outer:person:alice`), aren't parsed: a guess would name a
+        // different record.
+        if rest.first == "[" || rest.first == "{" || (Self.unwrap(rest) == nil && rest.contains(":")) {
             return nil
         }
         self.table = table
@@ -317,7 +320,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .int(let value):
             return "\(value)"
         case .double(let value):
-            if value.isNaN { return "math::nan" }
+            if value.isNaN { return "NaN" }
             if value.isInfinite { return value > 0 ? "math::inf" : "math::neg_inf" }
             return "\(value)f"
         case .string(let value):
