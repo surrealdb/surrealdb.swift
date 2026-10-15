@@ -602,6 +602,32 @@ try await client.transaction { tx in
 }
 ```
 
+### Interactive transactions
+
+Over WebSocket you can also hold a transaction open on the server and send statements into it one call at a time, reading results before deciding what to do next. Nothing it writes is visible outside it until it commits.
+
+```swift
+let tx = try await client.beginTransaction()
+let from = try await tx.select(recordID: SurrealRecordID(table: "account", id: .string("ada")), as: Account.self)
+if let from, from.balance >= 10 {
+    _ = try await tx.queryRaw("UPDATE account:ada SET balance -= 10; UPDATE account:bob SET balance += 10;")
+    try await tx.commit()
+} else {
+    try await tx.cancel()
+}
+```
+
+`withTransaction` commits when the closure returns and cancels when it throws:
+
+```swift
+try await client.withTransaction { tx in
+    _ = try await tx.create(Account(name: "ada", balance: 10))
+    _ = try await tx.create(Account(name: "bob", balance: 0))
+}
+```
+
+Sessions have their own: `session.beginTransaction()`. The server doesn't allow interactive transactions over HTTP, so there `beginTransaction()` throws `SurrealError.unsupportedFeature`. A transaction lives on the connection: if it drops, the transaction is gone and further calls on it throw.
+
 ---
 
 ## SurrealValue
