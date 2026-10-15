@@ -134,7 +134,9 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             throw SurrealError.notConnected
         }
 
-        let id = request.id
+        // The server echoes UUID-shaped ids lowercased over JSON, so match
+        // replies case-insensitively.
+        let id = request.id.lowercased()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 // Runs on the actor before onCancel's task can, so a request
@@ -259,7 +261,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     private static func handshake(_ socket: URLSessionWebSocketTask, codec: any WireCodec) async throws {
-        let id = UUID().uuidString
+        let id = UUID().uuidString.lowercased()
         let request = RPCRequest(id: id, method: "ping", params: nil, session: nil, txn: nil)
         try await socket.send(.data(try codec.encode(request)))
 
@@ -279,7 +281,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         if let error = envelope.error {
             throw SurrealError.serverError(error)
         }
-        guard envelope.id == id else {
+        guard envelope.id?.lowercased() == id else {
             throw SurrealError.invalidResponse("Unexpected reply to the connect ping.")
         }
     }
@@ -368,7 +370,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func handleIncoming(_ data: Data) async throws {
         let response = try codec.decodeEnvelope(data)
 
-        if let id = response.id, let continuation = takePending(id) {
+        if let id = response.id?.lowercased(), let continuation = takePending(id) {
             continuation.resume(returning: response)
             return
         }
@@ -378,6 +380,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         }
 
         liveContinuations[liveEvent.queryID]?.yield(liveEvent)
+        if liveEvent.action == .killed {
+            // KILLED is the last notification for this id.
+            liveContinuations.removeValue(forKey: liveEvent.queryID)?.finish()
+        }
     }
 
     // MARK: - Reconnect

@@ -14,6 +14,16 @@ struct RPCResponseEnvelope: Sendable {
     let action: String?
     let result: SurrealValue?
     let error: RPCErrorObject?
+    /// The affected record, on a live notification sent at the top level.
+    let record: SurrealValue?
+
+    init(id: String?, action: String?, result: SurrealValue?, error: RPCErrorObject?, record: SurrealValue? = nil) {
+        self.id = id
+        self.action = action
+        self.result = result
+        self.error = error
+        self.record = record
+    }
 }
 
 public struct RPCErrorCause: Sendable, Codable {
@@ -102,7 +112,7 @@ enum CBORSurrealCodec {
             error = try decodeRPCError(from: rawError)
         }
 
-        return RPCResponseEnvelope(id: id, action: action, result: result, error: error)
+        return RPCResponseEnvelope(id: id, action: action, result: result, error: error, record: map[string: "record"])
     }
 
     static func toCBOR(_ value: SurrealValue) -> CBOR {
@@ -568,6 +578,16 @@ private extension UUID {
 struct LiveWireEvent: Sendable {
     let queryID: UUID
     let action: LiveAction
-    let recordID: String
+    /// The record the notification is about; `nil` for `KILLED`.
+    let record: SurrealValue?
     let payload: SurrealValue
+
+    /// The record id as text, or `""` when there isn't one.
+    var recordID: String {
+        switch record {
+        case .recordID(let id)?: id.rawValue
+        case .string(let text)?: text
+        default: ""
+        }
+    }
 }

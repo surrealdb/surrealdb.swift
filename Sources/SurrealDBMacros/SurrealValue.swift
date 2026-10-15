@@ -16,6 +16,84 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         "\(SurrealQL.displayIdent(table)):\(idText)"
     }
 
+    /// Parses the text form the server sends record ids in over JSON
+    /// (`person:alice`, ``person:`123` ``, `person:⟨a b⟩`, `person:42`).
+    /// Integer keys become `.int`, `u'…'` keys `.uuid`, and identifier keys
+    /// `.string`. `nil` without a `table:`, and for array, object and
+    /// record-id keys, which this doesn't parse.
+    public init?(parsing text: String) {
+        guard let (table, rest) = Self.splitTable(text), !rest.isEmpty else { return nil }
+        // Array and object keys, and keys that are themselves record ids
+        // (`outer:person:alice`), aren't parsed: a guess would name a
+        // different record.
+        if rest.first == "[" || rest.first == "{" || (Self.unwrap(rest) == nil && rest.contains(":")) {
+            return nil
+        }
+        self.table = table
+        if let int = Int64(rest), rest.first != "+" {
+            self.id = .int(int)
+        } else if let uuid = Self.uuidKey(rest) {
+            self.id = .uuid(uuid)
+        } else if let unwrapped = Self.unwrap(rest) {
+            self.id = .string(unwrapped)
+        } else {
+            self.id = .string(rest)
+        }
+    }
+
+    private static func splitTable(_ text: String) -> (String, String)? {
+        if text.first == "`" || text.first == "⟨" {
+            let close: Character = text.first == "`" ? "`" : "⟩"
+            var escaped = false
+            var name = ""
+            for (offset, char) in text.dropFirst().enumerated() {
+                if escaped {
+                    name.append(char)
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == close {
+                    let rest = text.dropFirst(offset + 2)
+                    guard rest.first == ":" else { return nil }
+                    return (name, String(rest.dropFirst()))
+                } else {
+                    name.append(char)
+                }
+            }
+            return nil
+        }
+        guard let colon = text.firstIndex(of: ":") else { return nil }
+        return (String(text[..<colon]), String(text[text.index(after: colon)...]))
+    }
+
+    /// The UUID in a `u'…'` or `u"…"` key.
+    private static func uuidKey(_ key: String) -> UUID? {
+        guard key.count >= 4, key.hasPrefix("u'") && key.hasSuffix("'") || key.hasPrefix("u\"") && key.hasSuffix("\"") else {
+            return nil
+        }
+        return UUID(uuidString: String(key.dropFirst(2).dropLast()))
+    }
+
+    /// The contents of a `` `...` `` or `⟨...⟩` key, unescaped.
+    private static func unwrap(_ key: String) -> String? {
+        guard let open = key.first, let last = key.last, key.count >= 2,
+              (open == "`" && last == "`") || (open == "⟨" && last == "⟩")
+        else { return nil }
+        var result = ""
+        var escaped = false
+        for char in key.dropFirst().dropLast() {
+            if escaped {
+                result.append(char)
+                escaped = false
+            } else if char == "\\" {
+                escaped = true
+            } else {
+                result.append(char)
+            }
+        }
+        return result
+    }
+
     private var idText: String {
         switch id {
         case .string(let value):

@@ -188,8 +188,14 @@ public enum LiveAction: String, Sendable, Codable {
 
 public struct LiveEvent<T: Decodable & Sendable>: Sendable {
     public let queryID: UUID
+    /// What happened. `.killed` is the last event of a stream: the server
+    /// ended the live query (`KILL`, removing its table, or losing access),
+    /// and the stream finishes after delivering it.
     public let action: LiveAction
+    /// The record id as text (`person:alice`), or `""` for `.killed`.
     public let recordID: String
+    /// The record id, when the notification carries one.
+    public let record: SurrealRecordID?
     public let rawPayload: SurrealValue
     public let decoded: T?
 
@@ -197,12 +203,14 @@ public struct LiveEvent<T: Decodable & Sendable>: Sendable {
         queryID: UUID,
         action: LiveAction,
         recordID: String,
+        record: SurrealRecordID? = nil,
         rawPayload: SurrealValue,
         decoded: T?
     ) {
         self.queryID = queryID
         self.action = action
         self.recordID = recordID
+        self.record = record
         self.rawPayload = rawPayload
         self.decoded = decoded
     }

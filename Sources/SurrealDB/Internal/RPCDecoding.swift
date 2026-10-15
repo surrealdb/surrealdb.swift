@@ -47,19 +47,14 @@ enum RPCWire {
             let actionRaw = envelope.action,
             let action = LiveAction(rawValue: actionRaw),
             let id = envelope.id,
-            let queryID = UUID(uuidString: id),
-            let payloadValue = envelope.result
+            let queryID = UUID(uuidString: id)
         {
-            let recordValue = liveRecordValue(fromPayload: payloadValue)
-            guard let recordValue, let recordID = recordIDFromSurrealValue(recordValue) else {
-                return nil
-            }
-
+            let payload = envelope.result ?? .none
             return LiveWireEvent(
                 queryID: queryID,
                 action: action,
-                recordID: recordID,
-                payload: payloadValue
+                record: envelope.record.flatMap(nonEmpty) ?? liveRecordValue(fromPayload: payload),
+                payload: payload
             )
         }
 
@@ -69,6 +64,9 @@ enum RPCWire {
         return decodeLiveEvent(from: result)
     }
 
+    /// Decodes a notification: `{ id, action, record, result, session? }`.
+    /// `KILLED` carries no record and no result (both `NONE`), so neither is
+    /// required; dropping those used to leave the stream open forever.
     static func decodeLiveEvent(from value: SurrealValue) -> LiveWireEvent? {
         guard case .object(let object) = value else {
             return nil
@@ -76,29 +74,29 @@ enum RPCWire {
 
         guard
             let idValue = object["id"],
-            let actionValue = object["action"],
-            let payloadValue = object["result"],
-            case .string(let actionRaw) = actionValue,
-            let action = LiveAction(rawValue: actionRaw)
+            case .string(let actionRaw)? = object["action"],
+            let action = LiveAction(rawValue: actionRaw),
+            let queryID = uuidFromSurrealValue(idValue)
         else {
             return nil
         }
 
-        guard let queryID = uuidFromSurrealValue(idValue) else {
-            return nil
-        }
-
-        let recordValue = object["record"] ?? liveRecordValue(fromPayload: payloadValue)
-        guard let recordValue, let recordID = recordIDFromSurrealValue(recordValue) else {
-            return nil
-        }
+        let payload = object["result"] ?? .none
+        let record = object["record"].flatMap(nonEmpty) ?? liveRecordValue(fromPayload: payload)
 
         return LiveWireEvent(
             queryID: queryID,
             action: action,
-            recordID: recordID,
-            payload: payloadValue
+            record: record,
+            payload: payload
         )
+    }
+
+    private static func nonEmpty(_ value: SurrealValue) -> SurrealValue? {
+        switch value {
+        case .none, .null: nil
+        default: value
+        }
     }
 
     private static func stringFromSurrealValue(_ value: SurrealValue) -> String? {
@@ -114,17 +112,6 @@ enum RPCWire {
             return uuid
         case .string(let raw):
             return UUID(uuidString: raw)
-        default:
-            return nil
-        }
-    }
-
-    private static func recordIDFromSurrealValue(_ value: SurrealValue) -> String? {
-        switch value {
-        case .string(let raw):
-            return raw
-        case .recordID(let value):
-            return value.rawValue
         default:
             return nil
         }
