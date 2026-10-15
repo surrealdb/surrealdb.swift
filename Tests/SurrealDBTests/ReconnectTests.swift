@@ -138,3 +138,12 @@ func integration_connectTimesOutWhenHandshakeIsNeverAnswered() async throws {
     }
     #expect(Date().timeIntervalSince(started) < 5)
 }
+
+@Test
+func tcpProxy_acceptsBothHostForms() {
+    #expect(TCPProxy.hostAndPort("127.0.0.1:8123") == ("127.0.0.1", 8123))
+    #expect(TCPProxy.hostAndPort("localhost") == ("localhost", 8000))
+    #expect(TCPProxy.hostAndPort("http://127.0.0.1:8123") == ("127.0.0.1", 8123))
+    #expect(TCPProxy.hostAndPort("ws://db.local:9000/rpc") == ("db.local", 9000))
+    #expect(TCPProxy.hostAndPort("wss://db.example") == ("db.example", 443))
+}
