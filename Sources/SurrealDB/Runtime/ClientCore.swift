@@ -7,6 +7,9 @@ actor SurrealClientCore {
     private var reconnectReplayTask: Task<Void, Never>?
     private var activeReplay: Task<Void, Never>?
     let http: HTTPEndpoints?
+    /// Between a successful `connect()` and `close()`. The engines track
+    /// this themselves; it's here for the raw HTTP routes, which bypass them.
+    private(set) var isConnected = false
     private let checkServerVersion: Bool
 
     init(
@@ -43,6 +46,7 @@ actor SurrealClientCore {
             await engine.close()
             throw error
         }
+        isConnected = true
 
         guard let liveEngine = engine as? any LiveRPCEngine else {
             return
@@ -63,6 +67,7 @@ actor SurrealClientCore {
     }
 
     func close() async {
+        isConnected = false
         reconnectReplayTask?.cancel()
         reconnectReplayTask = nil
         await engine.close()
