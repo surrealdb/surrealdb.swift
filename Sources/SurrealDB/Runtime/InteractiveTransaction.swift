@@ -27,6 +27,10 @@ public struct SurrealInteractiveTransaction: Sendable {
 
     /// Commits the transaction. Throws if the server can't, for example
     /// because of a conflicting write; the transaction is then gone.
+    ///
+    /// Throws `CancellationError` without committing if the task is already
+    /// cancelled. Once the commit has started, cancelling the task no longer
+    /// stops it: this waits for the server's answer.
     public func commit() async throws {
         try await core.commitTransaction(id, session: session)
     }
@@ -255,7 +259,8 @@ extension SurrealClientCore {
             try await transaction.commit()
         } catch {
             // The commit may never have been sent (this task was cancelled
-            // after `body` returned), so roll back the same way.
+            // after `body` returned), so roll back the same way. A commit
+            // that was sent finishes regardless, so this can't undo one.
             await Task.detached { try? await transaction.cancel() }.value
             throw error
         }

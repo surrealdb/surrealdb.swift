@@ -92,6 +92,10 @@ private final class FakeSurreal: @unchecked Sendable {
         guard case .map(let request) = try CBORSerialization.cbor(from: data),
               let id = request[.utf8String("id")]
         else { return Data() }
+        if case .array(let params)? = request[.utf8String("params")], params.first == .utf8String("GARBAGE") {
+            // Not even an envelope, so there's no id to match.
+            return try CBORSerialization.data(from: .array([.unsignedInt(1)]))
+        }
         var result: CBOR = .null
         if request[.utf8String("method")] == .utf8String("version") {
             result = .utf8String("surrealdb-3.3.4")
@@ -131,4 +135,29 @@ func malformedTags_aBadReplyFailsOnlyItsRequest() async throws {
     let rows = try await client.queryRaw("GOOD", bindings: [:])
     #expect(rows.first?.result == .int(1))
     #expect(server.connections == 1)
+}
+
+@Test
+func malformedTags_anUnmatchableReplyResetsTheConnection() async throws {
+    let server = FakeSurreal()
+    try await server.start()
+    defer { server.stop() }
+
+    let client = try SurrealClient(
+        endpoint: "ws://127.0.0.1:\(server.port)",
+        options: .init(requestTimeout: 30),
+        websocketOptions: .init(reconnectBaseDelay: 0.05)
+    )
+    try await client.connect()
+    defer { Task { await client.close() } }
+
+    // Fails now, rather than at the timeout...
+    let started = Date()
+    await #expect(throws: SurrealError.self) {
+        _ = try await client.queryRaw("GARBAGE", bindings: [:])
+    }
+    #expect(Date().timeIntervalSince(started) < 5)
+    // ...and the client carries on over a new connection.
+    #expect(await eventually { (try? await client.queryRaw("GOOD", bindings: [:]).first?.result) == .int(1) })
+    #expect(server.connections == 2)
 }

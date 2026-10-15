@@ -228,6 +228,31 @@ func integration_reissuedLiveQueriesKeepTheirVariables() async throws {
     #expect(await eventually { live.snapshot.map(\.decoded?.text) == ["ten"] })
 }
 
+@Test
+func integration_aFailedManualReconnectFinishesLiveStreams() async throws {
+    guard IntegrationEnv.canProxy else { return }
+
+    let proxy = TCPProxy(upstream: IntegrationEnv.host)
+    try await proxy.start()
+    defer { proxy.shutdown() }
+    // A long backoff keeps the automatic reconnect waiting.
+    let client = try await integrationClient("ws://127.0.0.1:\(proxy.port)", websocketOptions: .init(reconnectBaseDelay: 60))
+    defer { Task { await client.close() } }
+    _ = try await client.queryRaw("DEFINE TABLE note SCHEMALESS;")
+    let live = Collected(try await client.live(LiveQuery<Note>(sql: "LIVE SELECT * FROM note;")))
+    defer { live.cancel() }
+
+    proxy.setRejecting(true)
+    proxy.dropConnections()
+    try await Task.sleep(nanoseconds: 200_000_000)
+    #expect(!live.isFinished)
+
+    // connect() takes over from the waiting reconnect. When it fails,
+    // nothing else will restore the stream, so it ends.
+    await #expect(throws: (any Error).self) { try await client.connect() }
+    #expect(await eventually { live.isFinished })
+}
+
 /// A live-capable engine whose `query` calls can be made to fail as if the
 /// connection dropped again.
 private actor FlakyLiveEngine: LiveRPCEngine {
