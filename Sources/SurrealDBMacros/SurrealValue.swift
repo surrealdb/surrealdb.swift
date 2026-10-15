@@ -362,7 +362,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
     }
 
     /// `-?digits[.digits][e[+-]digits]`.
-    static func isDecimalText(_ text: String) -> Bool {
+    package static func isDecimalText(_ text: String) -> Bool {
         text.range(of: #"^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$"#, options: .regularExpression) != nil
     }
 
