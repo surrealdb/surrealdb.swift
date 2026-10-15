@@ -33,6 +33,8 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
     /// The `connect()` in flight, which overlapping calls wait for.
     private var pendingConnect: Task<Void, Error>?
+    /// The connect() calls waiting on `pendingConnect`.
+    private var connectCallers: Set<UUID> = []
     /// The socket an attempt is handshaking on, before it becomes `task`.
     /// close() cancels it, so the attempt fails at once.
     private var connectingSocket: URLSessionWebSocketTask?
@@ -53,7 +55,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
     func connect() async throws {
         if let pendingConnect {
-            return try await pendingConnect.value
+            return try await join(pendingConnect)
         }
         closedByClient = false
         reconnectTask?.cancel()
@@ -67,7 +69,31 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
                 pendingConnect = nil
             }
         }
-        try await connecting.value
+        try await join(connecting)
+    }
+
+    /// Waits for a connection attempt on behalf of one connect() caller.
+    /// The attempt is shared, so it's abandoned only once every caller
+    /// waiting on it has been cancelled.
+    private func join(_ attempt: Task<Void, Error>) async throws {
+        let caller = UUID()
+        connectCallers.insert(caller)
+        defer { connectCallers.remove(caller) }
+        try await withTaskCancellationHandler {
+            try await attempt.value
+        } onCancel: {
+            Task { await self.connectCallerCancelled(caller, attempt) }
+        }
+        try Task.checkCancellation()
+    }
+
+    private func connectCallerCancelled(_ caller: UUID, _ attempt: Task<Void, Error>) {
+        connectCallers.remove(caller)
+        guard connectCallers.isEmpty, pendingConnect == attempt else { return }
+        attempt.cancel()
+        pendingConnect = nil
+        connectingSocket?.cancel(with: .goingAway, reason: nil)
+        connectingSocket = nil
     }
 
     func close() async {
