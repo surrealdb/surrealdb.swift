@@ -40,7 +40,7 @@ private func proxiedClient(
 
 @Test
 func integration_wsReconnectsOnceAfterDrop() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -64,7 +64,7 @@ func integration_wsReconnectsOnceAfterDrop() async throws {
 
 @Test
 func integration_wsReconnectStopsAfterMaxAttempts() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -98,7 +98,7 @@ func integration_wsReconnectStopsAfterMaxAttempts() async throws {
 
 @Test
 func integration_overlappingConnectsShareOneSocket() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -119,7 +119,7 @@ func integration_overlappingConnectsShareOneSocket() async throws {
 
 @Test
 func integration_connectTimesOutWhenHandshakeIsNeverAnswered() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -140,8 +140,17 @@ func integration_connectTimesOutWhenHandshakeIsNeverAnswered() async throws {
 }
 
 @Test
+func tcpProxy_acceptsBothHostForms() {
+    #expect(TCPProxy.hostAndPort("127.0.0.1:8123") == ("127.0.0.1", 8123))
+    #expect(TCPProxy.hostAndPort("localhost") == ("localhost", 8000))
+    #expect(TCPProxy.hostAndPort("http://127.0.0.1:8123") == ("127.0.0.1", 8123))
+    #expect(TCPProxy.hostAndPort("ws://db.local:9000/rpc") == ("db.local", 9000))
+    #expect(TCPProxy.hostAndPort("wss://db.example") == ("db.example", 443))
+}
+
+@Test
 func integration_closeAbandonsAConnectStillInHandshake() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -174,7 +183,7 @@ func integration_closeAbandonsAConnectStillInHandshake() async throws {
 
 @Test
 func integration_cancellingConnectAbandonsTheHandshake() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()

@@ -82,6 +82,13 @@ enum IntegrationEnv {
         return "\(scheme)://\(host)"
     }
 
+    /// Whether the proxy-based tests can run. `TCPProxy` forwards plain TCP
+    /// and the tests reach it over `ws://`, so a TLS host (`https://`,
+    /// `wss://`) can't sit behind it.
+    static var canProxy: Bool {
+        enabled && !["https://", "wss://"].contains { host.lowercased().hasPrefix($0) }
+    }
+
     static var hasCredentials: Bool {
         user != nil && password != nil
     }
@@ -273,7 +280,7 @@ func integration_wsLiveQueries() async throws {
     try await authenticateIfNeeded(client)
     try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
 
-    let defineTable = try await client.queryRaw("DEFINE TABLE \(IntegrationLivePerson.surrealTable) SCHEMALESS;", bindings: [:])
+    let defineTable = try await client.queryRaw("DEFINE TABLE IF NOT EXISTS \(IntegrationLivePerson.surrealTable) SCHEMALESS;", bindings: [:])
     assertAllOK(defineTable)
 
     let recordKey = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")

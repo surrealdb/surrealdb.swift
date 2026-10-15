@@ -1,6 +1,6 @@
 services:
   surrealdb:
-    image: surrealdb/surrealdb:v3.0.1
+    image: surrealdb/surrealdb:${SURREALDB_IMAGE_TAG:-v3.3.4}
     command: start --log info --user ${SURREALDB_USER:-root} --pass ${SURREALDB_PASSWORD:-root} memory
     ports:
       - "${SURREALDB_PORT:-8000}:8000"

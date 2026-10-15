@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- CI runs every integration test against a version matrix: SurrealDB 3.3.4 (pinned) and the nightly build. `scripts/test-integration.sh` takes the server binary from `SURREALDB_BIN`.
+- The README's installation snippet now points at the current release.
 ### Added
 - `SurrealWebSocketOptions.reconnectMaxDelay` caps the backoff between reconnect attempts.
 

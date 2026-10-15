@@ -7,7 +7,7 @@ A Swift SDK for [SurrealDB](https://surrealdb.com) with full async/await support
 ## Requirements
 
 - Swift 6.1+
-- SurrealDB v3+
+- SurrealDB 3.x (CI tests 3.3.4 and the nightly build)
 
 ## Platforms
 
@@ -33,7 +33,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/surrealdb/surrealdb.swift.git", from: "0.1.0"),
+    .package(url: "https://github.com/surrealdb/surrealdb.swift.git", from: "1.0.0-alpha.2"),
 ],
 targets: [
     .target(
@@ -934,6 +934,8 @@ Integration environment variables:
 | `SURREALDB_USER` | _(unset)_ | If unset, sign-in is skipped. |
 | `SURREALDB_PASSWORD` | _(unset)_ | If unset, sign-in is skipped. |
 | `SURREALDB_AUTH_LEVEL` | `root` | One of `root`, `namespace` / `ns`, `database` / `db`. |
+
+`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to test a particular `surreal` binary (this runs it locally even when Docker is available), or `SURREALDB_IMAGE_TAG` to choose the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build.
 
 ---
 
