@@ -61,6 +61,13 @@ start_local_surreal() {
   surreal_bin="${SURREALDB_BIN:-$(command -v surreal || true)}"
   local install_dir="${PWD}/.build/surrealdb-bin"
 
+  # A pinned binary that can't run is an error, not a reason to test a
+  # different version.
+  if [[ -n "${SURREALDB_BIN:-}" && ! -x "$SURREALDB_BIN" ]]; then
+    echo "SURREALDB_BIN is set but not executable: ${SURREALDB_BIN}"
+    return 1
+  fi
+
   if [[ -z "$surreal_bin" ]]; then
     surreal_bin="${install_dir}/surreal"
   fi
