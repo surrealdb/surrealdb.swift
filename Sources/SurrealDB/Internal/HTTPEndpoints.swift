@@ -43,9 +43,9 @@ struct HTTPEndpoints: Sendable {
             else {
                 return
             }
-            let failed = rows.enumerated().filter { $0.element.status == .err }
+            let failed = rows.filter { $0.status == .err }
             if !failed.isEmpty {
-                throw SurrealError.importFailed(failed.map { index, row in
+                throw SurrealError.importFailed(failed.enumerated().map { index, row in
                     QueryErrorDetail(index: index, message: row.errorMessage, kind: row.kind, details: row.details)
                 })
             }
