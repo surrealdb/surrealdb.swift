@@ -42,7 +42,7 @@ func integration_versionAndHealth() async throws {
 
 @Test
 func integration_letAndUnsetAreServerSideAndSurviveReconnect() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     for endpoint in integrationEndpoints {
         let client = try await integrationClient(endpoint)

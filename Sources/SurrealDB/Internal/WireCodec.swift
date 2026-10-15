@@ -1,4 +1,5 @@
 import Foundation
+import PotentCBOR
 
 /// Selects the wire encoding used by an engine when serializing RPC traffic.
 public enum SurrealWireProtocol: Sendable, Hashable {
@@ -24,6 +25,9 @@ protocol WireCodec: Sendable {
 
     func encode(_ request: RPCRequest) throws -> Data
     func decodeEnvelope(_ data: Data) throws -> RPCResponseEnvelope
+    /// The `id` of a message `decodeEnvelope` couldn't read, if it can be
+    /// found without decoding the rest.
+    func requestID(in data: Data) -> String?
 }
 
 extension WireCodec {
@@ -51,6 +55,15 @@ struct CBORWireCodec: WireCodec {
     func decodeEnvelope(_ data: Data) throws -> RPCResponseEnvelope {
         try CBORSurrealCodec.decodeRPCEnvelope(data)
     }
+
+    func requestID(in data: Data) -> String? {
+        guard case .map(let map)? = try? CBORSerialization.cbor(from: data),
+              case .utf8String(let id)? = map[.utf8String("id")]
+        else {
+            return nil
+        }
+        return id
+    }
 }
 
 struct JSONWireCodec: WireCodec {
@@ -63,6 +76,11 @@ struct JSONWireCodec: WireCodec {
 
     func decodeEnvelope(_ data: Data) throws -> RPCResponseEnvelope {
         try JSONRPCCodec.decodeRPCEnvelope(data)
+    }
+
+    func requestID(in data: Data) -> String? {
+        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return object?["id"] as? String
     }
 }
 

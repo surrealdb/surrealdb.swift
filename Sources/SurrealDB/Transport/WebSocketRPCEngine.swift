@@ -120,7 +120,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
                     return
                 }
                 pending[id] = continuation
-                startTimer(for: id)
+                startTimer(for: id, method: request.method)
                 Task {
                     do {
                         let payload = try codec.encode(request)
@@ -135,13 +135,31 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         }
     }
 
-    private func startTimer(for id: String) {
+    /// Methods that change the connection's server-side state. If one times
+    /// out, the server may still apply it after the client has given up and
+    /// kept its old idea of that state.
+    private static let stateChangingMethods: Set<String> = [
+        "use", "signin", "signup", "authenticate", "invalidate", "let", "unset",
+        "reset", "attach", "detach", "begin",
+    ]
+
+    private func startTimer(for id: String, method: String) {
         let timeout = clientOptions.requestTimeout
         guard timeout > 0, timeout.isFinite else { return }
         timers[id] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            await self?.failPending(requestID: id, with: SurrealError.timeout)
+            await self?.requestTimedOut(id, method: method)
+        }
+    }
+
+    private func requestTimedOut(_ id: String, method: String) {
+        guard pending[id] != nil else { return }
+        failPending(requestID: id, with: SurrealError.timeout)
+        // Start over on a new socket, whose state the client replays from
+        // what it knows, rather than guess whether this one applied.
+        if Self.stateChangingMethods.contains(method), connected {
+            handleSocketTermination(generation: generation, error: SurrealError.timeout)
         }
     }
 
@@ -323,7 +341,17 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     private func handleIncoming(_ data: Data) async throws {
-        let response = try codec.decodeEnvelope(data)
+        let response: RPCResponseEnvelope
+        do {
+            response = try codec.decodeEnvelope(data)
+        } catch {
+            // A reply that won't decode (say, a malformed tag in its result)
+            // fails its own request; the connection is fine.
+            if let id = codec.requestID(in: data)?.lowercased(), let continuation = takePending(id) {
+                continuation.resume(throwing: error as? SurrealError ?? SurrealError.invalidResponse("Couldn't decode the reply: \(error)"))
+            }
+            return
+        }
 
         if let id = response.id?.lowercased(), let continuation = takePending(id) {
             continuation.resume(returning: response)

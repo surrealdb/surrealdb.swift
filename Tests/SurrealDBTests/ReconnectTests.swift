@@ -40,7 +40,7 @@ private func proxiedClient(
 
 @Test
 func integration_wsReconnectsOnceAfterDrop() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -64,7 +64,7 @@ func integration_wsReconnectsOnceAfterDrop() async throws {
 
 @Test
 func integration_wsReconnectStopsAfterMaxAttempts() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -98,7 +98,7 @@ func integration_wsReconnectStopsAfterMaxAttempts() async throws {
 
 @Test
 func integration_overlappingConnectsShareOneSocket() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -119,7 +119,7 @@ func integration_overlappingConnectsShareOneSocket() async throws {
 
 @Test
 func integration_connectTimesOutWhenHandshakeIsNeverAnswered() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -150,7 +150,7 @@ func tcpProxy_acceptsBothHostForms() {
 
 @Test
 func integration_closeAbandonsAConnectStillInHandshake() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
