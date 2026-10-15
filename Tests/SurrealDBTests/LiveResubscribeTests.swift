@@ -264,4 +264,25 @@ func core_resubscribeKeepsTheStreamWhenTheConnectionDropsAgain() async throws {
     await engine.failNextQuery(with: SurrealError.queryErrors([QueryErrorDetail(index: 0, message: "no", details: nil)]))
     await engine.fireReconnect()
     try await waitFor { await engine.closed.count == 1 }
+
+    // So does a timeout: the socket may be up, with no reconnect to retry.
+    _ = try await core.live(LiveQuery<SurrealValue>(sql: "LIVE SELECT * FROM note;"), session: nil)
+    await engine.failNextQuery(with: SurrealError.timeout)
+    await engine.fireReconnect()
+    try await waitFor { await engine.closed.count == 2 }
+}
+
+@Test
+func core_liveOfRejectsASecondStreamForTheSameQuery() async throws {
+    let engine = FlakyLiveEngine()
+    let core = SurrealClientCore(engine: engine)
+    try await core.connect()
+    let id = UUID()
+    _ = try await core.liveOf(id, session: nil, as: SurrealValue.self)
+    await #expect(throws: SurrealError.self) {
+        _ = try await core.liveOf(id, session: nil, as: SurrealValue.self)
+    }
+    let live = try await core.live(LiveQuery<SurrealValue>(sql: "LIVE SELECT * FROM note;"), session: nil)
+    _ = live
+    _ = try await core.liveOf(UUID(), session: nil, as: SurrealValue.self)
 }
