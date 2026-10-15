@@ -92,12 +92,12 @@ enum CBORSurrealCodec {
             throw SurrealError.invalidResponse("Expected RPC response object.")
         }
 
-        let id = map[string: "id"].flatMap(stringFromSurrealValue(_:))
-        let action = map[string: "action"].flatMap(stringFromSurrealValue(_:))
-        let result = map[string: "result"]
+        let id = try map.decoded("id").flatMap(stringFromSurrealValue(_:))
+        let action = try map.decoded("action").flatMap(stringFromSurrealValue(_:))
+        let result = try map.decoded("result")
 
         var error: RPCErrorObject?
-        if let rawError = map[string: "error"] {
+        if let rawError = try map.decoded("error") {
             error = try decodeRPCError(from: rawError)
         }
 
@@ -271,16 +271,17 @@ enum CBORSurrealCodec {
             }
             return .datetime(date)
         case .uuid:
-            guard case .byteString(let data) = value,
-                  let uuid = UUID(uuidData: data)
-            else {
-                return .null
+            guard case .byteString(let data) = value, let uuid = UUID(uuidData: data) else {
+                throw SurrealError.invalidResponse("Expected 16 bytes for a UUID (tag 37).")
             }
             return .uuid(uuid)
         case tagNone:
             return .none
         case tagTable:
-            return .table(stringFromCBOR(value) ?? "")
+            guard let name = stringFromCBOR(value) else {
+                throw SurrealError.invalidResponse("Expected a string for a table name (tag 7).")
+            }
+            return .table(name)
         case tagRecordID:
             if case .utf8String(let raw) = value {
                 let pieces = raw.split(separator: ":", maxSplits: 1)
@@ -294,11 +295,18 @@ enum CBORSurrealCodec {
                case .utf8String(let table) = items[0] {
                 return .recordID(.init(table: table, id: try fromCBOR(items[1])))
             }
-            return .null
+            throw SurrealError.invalidResponse("Expected [table, key] for a record id (tag 8).")
         case tagStringUUID:
-            return .uuid(UUID(uuidString: stringFromCBOR(value) ?? "") ?? UUID())
+            // Used to fall back to a fresh random UUID.
+            guard let text = stringFromCBOR(value), let uuid = UUID(uuidString: text) else {
+                throw SurrealError.invalidResponse("Expected a UUID string (tag 9).")
+            }
+            return .uuid(uuid)
         case tagStringDecimal:
-            return .decimal(stringFromCBOR(value) ?? "0")
+            guard let text = stringFromCBOR(value), SurrealValue.isDecimalText(text) else {
+                throw SurrealError.invalidResponse("Expected a decimal string (tag 10).")
+            }
+            return .decimal(text)
         case tagStringDuration:
             guard let text = stringFromCBOR(value) else {
                 throw SurrealError.invalidResponse("Expected a string for a tagged duration (tag 13).")
@@ -338,12 +346,12 @@ enum CBORSurrealCodec {
                 let end = try decodeBound(from: bounds[1])
                 return .range(.init(begin: begin, end: end))
             }
-            return .null
+            throw SurrealError.invalidResponse("Expected [begin, end] bounds for a range (tag 49).")
         case tagSet:
-            if case .array(let values) = value {
-                return .set(try values.map(fromCBOR(_:)))
+            guard case .array(let values) = value else {
+                throw SurrealError.invalidResponse("Expected an array for a set (tag 56).")
             }
-            return .set([])
+            return .set(try values.map(fromCBOR(_:)))
         case tagGeometryPoint:
             return .geometry(.point(doubleArray(from: value)))
         case tagGeometryLine:
@@ -503,11 +511,13 @@ enum CBORSurrealCodec {
 }
 
 private extension CBOR.Map {
-    subscript(string key: String) -> SurrealValue? {
+    /// The value under `key`, or `nil` if absent. A value that's present but
+    /// malformed throws rather than reading as absent.
+    func decoded(_ key: String) throws -> SurrealValue? {
         guard let cborValue = self[.utf8String(key)] else {
             return nil
         }
-        return try? CBORSurrealCodec.fromCBOR(cborValue)
+        return try CBORSurrealCodec.fromCBOR(cborValue)
     }
 }
 
