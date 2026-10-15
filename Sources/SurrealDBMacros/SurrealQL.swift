@@ -16,11 +16,29 @@ public enum SurrealQL {
     }
 
     /// Escapes a dotted field path one segment at a time, so `address.city`
-    /// becomes `` `address`.`city` ``.
+    /// becomes `` `address`.`city` ``. Array parts after a name (`[0]`,
+    /// `[*]`, `[$]`) are kept as syntax: `results[0].score` becomes
+    /// `` `results`[0].`score` ``. Anything else is part of the name.
     public static func escapeFieldPath(_ path: String) -> String {
         path.split(separator: ".", omittingEmptySubsequences: false)
-            .map { escapeIdent(String($0)) }
+            .map { escapePathSegment(String($0)) }
             .joined(separator: ".")
+    }
+
+    private static func escapePathSegment(_ segment: String) -> String {
+        var name = Substring(segment)
+        var parts: [Substring] = []
+        // Peel `[n]`, `[*]` and `[$]` off the end.
+        while name.hasSuffix("]"), let open = name.lastIndex(of: "[") {
+            let inner = name[name.index(after: open)..<name.index(before: name.endIndex)]
+            guard inner == "*" || inner == "$" || (!inner.isEmpty && inner.allSatisfy { $0.isASCII && $0.isNumber }) else {
+                break
+            }
+            parts.insert(name[open...], at: 0)
+            name = name[..<open]
+        }
+        guard !name.isEmpty else { return escapeIdent(segment) }
+        return escapeIdent(String(name)) + parts.joined()
     }
 
     /// Quotes a string as a double-quoted SurrealQL string literal.
