@@ -112,7 +112,7 @@ enum CBORSurrealCodec {
             error = try decodeRPCError(from: rawError)
         }
 
-        return RPCResponseEnvelope(id: id, action: action, result: result, error: error, record: map[string: "record"])
+        return RPCResponseEnvelope(id: id, action: action, result: result, error: error, record: try map.decoded("record"))
     }
 
     static func toCBOR(_ value: SurrealValue) -> CBOR {
