@@ -10,6 +10,8 @@ actor SurrealClientCore {
     /// Between a successful `connect()` and `close()`. The engines track
     /// this themselves; it's here for the raw HTTP routes, which bypass them.
     private(set) var isConnected = false
+    /// Bumped by `close()`, so a `connect()` it interrupted can tell.
+    private var closeCount = 0
     private let checkServerVersion: Bool
 
     init(
@@ -33,6 +35,7 @@ actor SurrealClientCore {
     func connect() async throws {
         // Connected again only once this attempt succeeds.
         isConnected = false
+        let closes = closeCount
         try await engine.connect()
 
         // Subscribe before anything else awaits: a reconnect during the
@@ -53,6 +56,10 @@ actor SurrealClientCore {
             await engine.close()
             throw error
         }
+        // close() ran while this was waiting on the server.
+        guard closes == closeCount else {
+            throw SurrealError.notConnected
+        }
         isConnected = true
 
         guard let reconnects else {
@@ -70,6 +77,7 @@ actor SurrealClientCore {
 
     func close() async {
         isConnected = false
+        closeCount += 1
         reconnectReplayTask?.cancel()
         reconnectReplayTask = nil
         await engine.close()
