@@ -24,6 +24,26 @@ func duration_rejectsMalformedTag14() {
     #expect(throws: SurrealError.self) { try decode(.tagged(tag, .utf8String("1h"))) }
     #expect(throws: SurrealError.self) { try decode(.tagged(tag, .array([.negativeInt(0)]))) }
     #expect(throws: SurrealError.self) { try decode(.tagged(tag, .array([.unsignedInt(1), .unsignedInt(UInt64(UInt32.max) + 1)]))) }
+    // The server's nanoseconds are always under a second.
+    #expect(throws: SurrealError.self) { try decode(.tagged(tag, .array([.unsignedInt(UInt64.max), .unsignedInt(1_000_000_000)]))) }
+}
+
+@Test
+func duration_componentsAtTheLimitsDoNotTrap() {
+    // Used to trap adding the carried second to UInt64.max seconds.
+    let huge = SurrealValue.duration(seconds: UInt64.max, nanoseconds: UInt32.max)
+    guard case .duration(let text) = huge else {
+        Issue.record("Expected a duration")
+        return
+    }
+    #expect(text.hasSuffix("4294ms967µs295ns"))
+    // Too long to represent as seconds and nanoseconds, so parsing gives nil
+    // rather than trapping.
+    #expect(huge.durationComponents == nil)
+    #expect(SurrealValue.duration("584942417356y").durationComponents == nil)
+
+    // Below the limit, extra nanoseconds still carry into seconds.
+    #expect(SurrealValue.duration(seconds: 1, nanoseconds: 1_500_000_000) == .duration("2s500ms"))
 }
 
 @Test
