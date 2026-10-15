@@ -109,12 +109,26 @@ public struct SurrealFileRef: Sendable, Hashable, Codable {
     public let bucket: String
     public let key: String
 
+    /// `key` is the file's path in the bucket. It always starts with `/`,
+    /// which is added when missing, as the server does.
     public init(bucket: String, key: String) {
         self.bucket = bucket
-        self.key = key
+        self.key = key.hasPrefix("/") ? key : "/" + key
     }
 
-    /// `bucket:key`, as inside the `f"..."` literal.
+    private enum CodingKeys: String, CodingKey {
+        case bucket, key
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            bucket: try container.decode(String.self, forKey: .bucket),
+            key: try container.decode(String.self, forKey: .key)
+        )
+    }
+
+    /// `bucket:/key`, as inside the `f"..."` literal.
     public var rawValue: String {
         "\(bucket):\(key)"
     }
@@ -351,7 +365,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .geometry:
             return "<geometry>"
         case .file(let value):
-            return "f\(SurrealQL.quote(value.rawValue))"
+            // File literals take no escapes, so build it from strings.
+            return "type::file(\(SurrealQL.quote(value.bucket)), \(SurrealQL.quote(value.key)))"
         case .array(let value):
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .object(let value):
