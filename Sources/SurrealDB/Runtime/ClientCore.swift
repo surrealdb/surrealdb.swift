@@ -724,8 +724,12 @@ actor SurrealClientCore {
 extension SurrealClientCore {
     func live<T: Decodable & Sendable>(_ query: LiveQuery<T>, session: SessionID?) async throws -> AsyncStream<LiveEvent<T>> {
         let liveEngine = try requireLiveEngine()
+        // The server captures session variables when the query registers.
+        // Keep their values now, so a re-issue after a reconnect filters the
+        // same way even if they've changed since.
+        let captured = try sessionContext(for: session).variables.merging(query.bindings) { _, explicit in explicit }
         let queryID = try await registerLiveQuery(sql: query.sql, bindings: query.bindings, session: session, gated: true)
-        let subscription = LiveSubscription(query: LiveSubscription.Query(sql: query.sql, bindings: query.bindings), session: session, serverID: queryID)
+        let subscription = LiveSubscription(query: LiveSubscription.Query(sql: query.sql, bindings: captured), session: session, serverID: queryID)
         return await stream(for: subscription, engine: liveEngine, as: T.self)
     }
 
