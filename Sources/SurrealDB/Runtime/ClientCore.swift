@@ -143,7 +143,7 @@ actor SurrealClientCore {
     /// isn't registered in `sessions` yet at attach time (and during
     /// reconnect replay, re-attaching must not depend on lookup state).
     private func sendAttach(_ id: SessionID) async throws {
-        let request = RPCRequest(id: UUID().uuidString, method: "attach", params: nil, session: id.rawValue.uuidString, txn: nil)
+        let request = RPCRequest(id: UUID().uuidString.lowercased(), method: "attach", params: nil, session: id.rawValue.uuidString, txn: nil)
         let envelope = try await engine.send(request, session: rootSession)
         if let error = envelope.error {
             throw SurrealError.serverError(error)
@@ -347,7 +347,9 @@ actor SurrealClientCore {
         session: SessionID?
     ) async throws -> [Model] {
         let payload = try SurrealValue.fromEncodable(content)
-        let query = SurrealDSL.upsert(model, where: predicate, bindings: ["content": payload])
+        // A table-wide UPSERT with no WHERE inserts one new record rather
+        // than touching the existing ones; `WHERE true` updates them all.
+        let query = SurrealDSL.upsert(model, where: predicate ?? SurrealPredicate(raw: "true"), bindings: ["content": payload])
         return try await self.query(query, session: session)
     }
 
@@ -414,7 +416,7 @@ actor SurrealClientCore {
     private func performRPC(_ method: String, params: [SurrealValue]? = nil, session: SessionID?) async throws -> SurrealValue {
         let context = try sessionContext(for: session)
         let request = RPCRequest(
-            id: UUID().uuidString,
+            id: UUID().uuidString.lowercased(),
             method: method,
             params: params,
             session: session?.rawValue.uuidString,
@@ -513,8 +515,14 @@ extension SurrealClientCore {
                 for await event in wireStream {
                     let decoded = event.action == .killed ? nil : try? event.payload.decode(T.self)
                     var record: SurrealRecordID?
-                    if case .recordID(let id)? = event.record {
+                    switch event.record {
+                    case .recordID(let id)?:
                         record = id
+                    case .string(let text)?:
+                        // The JSON wire format sends record ids as text.
+                        record = SurrealRecordID(parsing: text)
+                    default:
+                        break
                     }
                     continuation.yield(
                         LiveEvent(
