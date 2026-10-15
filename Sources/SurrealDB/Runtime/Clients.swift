@@ -159,20 +159,47 @@ public actor SurrealClient: SurrealLiveQueryable {
         try await core.create(recordID: recordID, content: content, session: nil)
     }
 
+    /// Replaces the content of every record matching `predicate`.
+    ///
+    /// The predicate is required: without one this replaced every record in
+    /// the table. Use ``updateAll(_:content:)`` when that's what you want.
     public func update<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
-        where predicate: SurrealPredicate? = nil
+        where predicate: SurrealPredicate
     ) async throws -> [Model] {
         try await core.update(model, content: content, where: predicate, session: nil)
     }
 
+    /// Replaces the content of every record in the table with `content`.
+    public func updateAll<Model: SurrealModel & Codable & Sendable>(
+        _ model: Model.Type,
+        content: Model
+    ) async throws -> [Model] {
+        try await core.update(model, content: content, where: nil, session: nil)
+    }
+
+    /// Replaces the content of every record matching `predicate`, or creates
+    /// a record if none match.
+    ///
+    /// The predicate is required: without one this inserted a new record on
+    /// every call. Use `create(_:)` for that, or ``upsertAll(_:content:)`` to
+    /// replace every record in the table.
     public func upsert<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
-        where predicate: SurrealPredicate? = nil
+        where predicate: SurrealPredicate
     ) async throws -> [Model] {
         try await core.upsert(model, content: content, where: predicate, session: nil)
+    }
+
+    /// Replaces the content of every record in the table with `content`, or
+    /// creates a record if the table is empty.
+    public func upsertAll<Model: SurrealModel & Codable & Sendable>(
+        _ model: Model.Type,
+        content: Model
+    ) async throws -> [Model] {
+        try await core.upsert(model, content: content, where: nil, session: nil)
     }
 
     public func delete<Model: SurrealModel & Decodable & Sendable>(
