@@ -180,6 +180,62 @@ func connectionStatus_replayAfterAnotherDropDoesNotReportConnected() async throw
     #expect(status.current == .reconnecting(attempt: 1))
 }
 
+/// A live engine whose socket drops just after the replay asks whether
+/// it's still connected, the way a real drop can race the replay's end.
+private actor DropAfterCheckEngine: LiveRPCEngine {
+    private let status: ConnectionStatusBroadcaster
+    private var reconnectContinuation: AsyncStream<Void>.Continuation?
+    private var identity: Int? = 1
+    private var checks = 0
+
+    init(status: ConnectionStatusBroadcaster) { self.status = status }
+
+    /// The second check is the one after the replay.
+    private func dropIfSecondCheck() {
+        checks += 1
+        guard checks == 2 else { return }
+        identity = nil
+        status.send(.reconnecting(attempt: 1))
+    }
+
+    func connectionIdentity() async -> Int? {
+        let current = identity
+        dropIfSecondCheck()
+        return current
+    }
+
+    func ifConnectionIs(_ expected: Int, _ action: @Sendable () -> Void) async {
+        if identity == expected { action() }
+        dropIfSecondCheck()
+    }
+
+    func connect() async throws {}
+    func close() async {}
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
+    }
+    func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> { AsyncStream { $0.finish() } }
+    func closeLiveStream(for queryID: UUID) async {}
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async {}
+    func reconnectEvents() -> AsyncStream<Void> { AsyncStream { self.reconnectContinuation = $0 } }
+    func fireReconnect() { reconnectContinuation?.yield(()) }
+    func hasSubscriber() -> Bool { reconnectContinuation != nil }
+}
+
+@Test
+func connectionStatus_dropRightAfterTheReplayIsNotOverwritten() async throws {
+    let status = ConnectionStatusBroadcaster()
+    let engine = DropAfterCheckEngine(status: status)
+    let core = SurrealClientCore(engine: engine, sessionContext: SessionContext(namespace: "ns", database: "db"), status: status)
+    try await core.connect()
+    defer { Task { await core.close() } }
+    #expect(await eventually { await engine.hasSubscriber() })
+
+    await engine.fireReconnect()
+    try await Task.sleep(nanoseconds: 300_000_000)
+    #expect(status.current == .reconnecting(attempt: 1))
+}
+
 /// Holds `version` until released, so a test can act mid-connect().
 private actor HeldVersionEngine: RPCEngine {
     private var held: [CheckedContinuation<Void, Never>] = []

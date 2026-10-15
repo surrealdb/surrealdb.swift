@@ -132,6 +132,12 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         connected ? generation : nil
     }
 
+    func ifConnectionIs(_ identity: Int, _ action: @Sendable () -> Void) async {
+        // A drop reports .reconnecting from inside this actor, so it lands
+        // either before this check or after the action, never in between.
+        if connected && generation == identity { action() }
+    }
+
     func reconnectEvents() -> AsyncStream<Void> {
         reconnectContinuation?.finish()
         return AsyncStream { continuation in

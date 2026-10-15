@@ -98,8 +98,9 @@ actor SurrealClientCore {
                     // Nor a drop during the replay, which reported
                     // .reconnecting; the next reconnect's replay reports
                     // .connected.
-                    guard let connection, await liveEngine.connectionIdentity() == connection else { continue }
-                    self.status.send(.connected)
+                    guard let connection else { continue }
+                    let status = self.status
+                    await liveEngine.ifConnectionIs(connection) { status.send(.connected) }
                 }
             }
         }

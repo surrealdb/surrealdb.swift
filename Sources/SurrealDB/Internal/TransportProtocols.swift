@@ -23,10 +23,18 @@ protocol LiveRPCEngine: RPCEngine {
     /// changes with every new socket, so a reconnect replay can tell whether
     /// the connection it restored is still the current one.
     func connectionIdentity() async -> Int?
+
+    /// Runs `action` only if `identity` is still the open connection, with
+    /// no chance for a drop to land between the check and the action.
+    func ifConnectionIs(_ identity: Int, _ action: @Sendable () -> Void) async
 }
 
 extension LiveRPCEngine {
     func connectionIdentity() async -> Int? { 0 }
+
+    func ifConnectionIs(_ identity: Int, _ action: @Sendable () -> Void) async {
+        if await connectionIdentity() == identity { action() }
+    }
 }
 
 /// Marker for engines whose connections can multiplex more than one
