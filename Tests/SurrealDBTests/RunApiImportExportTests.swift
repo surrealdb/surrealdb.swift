@@ -215,3 +215,31 @@ func integration_exportThenImportIntoAnotherDatabase() async throws {
         }
     }
 }
+
+/// Answers `version` with whatever it's set to.
+private actor SettableVersionEngine: RPCEngine {
+    var version: SurrealValue = .string("surrealdb-3.3.4")
+    func setVersion(_ value: SurrealValue) { version = value }
+    func connect() async throws {}
+    func close() async {}
+    func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
+        RPCResponseEnvelope(id: request.id, action: nil, result: request.method == "version" ? version : .null, error: nil)
+    }
+}
+
+@Test
+func importExport_failedReconnectLeavesTheClientDisconnected() async throws {
+    let engine = SettableVersionEngine()
+    let core = SurrealClientCore(
+        engine: engine,
+        http: HTTPEndpoints(rpcURL: URL(string: "http://127.0.0.1:1/rpc")!, timeout: 1),
+        checkServerVersion: true
+    )
+    try await core.connect()
+    await engine.setVersion(.int(3))
+    await #expect(throws: SurrealError.self) { try await core.connect() }
+    do {
+        try await core.importSQL("OPTION IMPORT;", session: nil)
+        Issue.record("Expected notConnected after a failed connect()")
+    } catch SurrealError.notConnected {}
+}
