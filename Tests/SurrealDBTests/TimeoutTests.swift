@@ -16,7 +16,7 @@ private func stalledClient(_ scheme: String, proxy: TCPProxy, timeout: TimeInter
 
 @Test
 func integration_requestsTimeOutWhenTheServerStopsAnswering() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     for scheme in ["ws", "http"] {
         let proxy = TCPProxy(upstream: IntegrationEnv.host)
@@ -43,7 +43,7 @@ func integration_requestsTimeOutWhenTheServerStopsAnswering() async throws {
 
 @Test
 func integration_cancellingAQueryReturnsPromptly() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -66,7 +66,7 @@ func integration_cancellingAQueryReturnsPromptly() async throws {
 
 @Test
 func integration_wsConnectTimesOutAgainstASilentHost() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
@@ -87,7 +87,7 @@ func integration_wsConnectTimesOutAgainstASilentHost() async throws {
 
 @Test
 func integration_aTimedOutStateChangeResetsTheSocket() async throws {
-    guard IntegrationEnv.enabled else { return }
+    guard IntegrationEnv.canProxy else { return }
 
     let proxy = TCPProxy(upstream: IntegrationEnv.host)
     try await proxy.start()
