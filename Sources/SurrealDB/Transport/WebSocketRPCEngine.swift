@@ -341,7 +341,17 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     private func handleIncoming(_ data: Data) async throws {
-        let response = try codec.decodeEnvelope(data)
+        let response: RPCResponseEnvelope
+        do {
+            response = try codec.decodeEnvelope(data)
+        } catch {
+            // A reply that won't decode (say, a malformed tag in its result)
+            // fails its own request; the connection is fine.
+            if let id = codec.requestID(in: data)?.lowercased(), let continuation = takePending(id) {
+                continuation.resume(throwing: error as? SurrealError ?? SurrealError.invalidResponse("Couldn't decode the reply: \(error)"))
+            }
+            return
+        }
 
         if let id = response.id?.lowercased(), let continuation = takePending(id) {
             continuation.resume(returning: response)
