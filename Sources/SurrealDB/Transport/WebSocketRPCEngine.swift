@@ -374,10 +374,14 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         } catch {
             // A reply that won't decode (say, a malformed tag in its result)
             // fails its own request; the connection is fine.
-            if let id = codec.requestID(in: data)?.lowercased(), let continuation = takePending(id) {
-                continuation.resume(throwing: error as? SurrealError ?? SurrealError.invalidResponse("Couldn't decode the reply: \(error)"))
+            if let id = codec.requestID(in: data)?.lowercased() {
+                takePending(id)?.resume(throwing: error as? SurrealError ?? SurrealError.invalidResponse("Couldn't decode the reply: \(error)"))
+                return
             }
-            return
+            // A message that can't be matched to anything might have been any
+            // reply or notification: treat the connection as broken rather
+            // than leave its request waiting.
+            throw error
         }
 
         if let id = response.id?.lowercased(), let continuation = takePending(id) {
