@@ -18,13 +18,19 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
 
     /// Parses the text form the server sends record ids in over JSON
     /// (`person:alice`, ``person:`123` ``, `person:⟨a b⟩`, `person:42`).
-    /// Integer keys become `.int`, everything else `.string`; complex keys
-    /// (arrays, objects) are kept as their text. `nil` without a `table:`.
+    /// Integer keys become `.int`, `u'…'` keys `.uuid`, and identifier keys
+    /// `.string`. `nil` without a `table:`, and for array and object keys,
+    /// which this doesn't parse: a guess would name a different record.
     public init?(parsing text: String) {
         guard let (table, rest) = Self.splitTable(text), !rest.isEmpty else { return nil }
+        if rest.first == "[" || rest.first == "{" {
+            return nil
+        }
         self.table = table
         if let int = Int64(rest), rest.first != "+" {
             self.id = .int(int)
+        } else if let uuid = Self.uuidKey(rest) {
+            self.id = .uuid(uuid)
         } else if let unwrapped = Self.unwrap(rest) {
             self.id = .string(unwrapped)
         } else {
@@ -55,6 +61,14 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         }
         guard let colon = text.firstIndex(of: ":") else { return nil }
         return (String(text[..<colon]), String(text[text.index(after: colon)...]))
+    }
+
+    /// The UUID in a `u'…'` or `u"…"` key.
+    private static func uuidKey(_ key: String) -> UUID? {
+        guard key.count >= 4, key.hasPrefix("u'") && key.hasSuffix("'") || key.hasPrefix("u\"") && key.hasSuffix("\"") else {
+            return nil
+        }
+        return UUID(uuidString: String(key.dropFirst(2).dropLast()))
     }
 
     /// The contents of a `` `...` `` or `⟨...⟩` key, unescaped.
