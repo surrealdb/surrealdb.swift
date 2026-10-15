@@ -142,10 +142,13 @@ let client = try SurrealClient(
     websocketOptions: SurrealWebSocketOptions(
         reconnectEnabled: true,
         maxReconnectAttempts: 8,
-        reconnectBaseDelay: 0.5
+        reconnectBaseDelay: 0.5,
+        reconnectMaxDelay: 30
     )
 )
 ```
+
+`connect()` waits for the server to answer before returning, and throws if it can't be reached within `requestTimeout`. After a drop, the client retries up to `maxReconnectAttempts` times, doubling the delay from `reconnectBaseDelay` up to `reconnectMaxDelay`, then gives up; calling `connect()` again starts over.
 
 ### Wire Protocol
 
@@ -612,7 +615,8 @@ SurrealClientOptions(
 SurrealWebSocketOptions(
     reconnectEnabled: true,       // default true
     maxReconnectAttempts: 8,      // default 8
-    reconnectBaseDelay: 0.5       // seconds, default 0.5
+    reconnectBaseDelay: 0.5,      // seconds, default 0.5
+    reconnectMaxDelay: 30         // seconds, default 30
 )
 ```
 

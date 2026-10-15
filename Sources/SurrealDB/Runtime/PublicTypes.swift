@@ -14,18 +14,26 @@ public struct SurrealClientOptions: Sendable {
 }
 
 public struct SurrealWebSocketOptions: Sendable {
+    /// Whether to reconnect after the connection drops unexpectedly.
     public var reconnectEnabled: Bool
+    /// How many reconnect attempts to make after a drop before giving up.
+    /// The count starts again after each successful reconnect.
     public var maxReconnectAttempts: Int
+    /// The delay before the first attempt; each later attempt doubles it.
     public var reconnectBaseDelay: TimeInterval
+    /// The longest delay between two attempts.
+    public var reconnectMaxDelay: TimeInterval
 
     public init(
         reconnectEnabled: Bool = true,
         maxReconnectAttempts: Int = 8,
-        reconnectBaseDelay: TimeInterval = 0.5
+        reconnectBaseDelay: TimeInterval = 0.5,
+        reconnectMaxDelay: TimeInterval = 30
     ) {
         self.reconnectEnabled = reconnectEnabled
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
+        self.reconnectMaxDelay = reconnectMaxDelay
     }
 }
 
