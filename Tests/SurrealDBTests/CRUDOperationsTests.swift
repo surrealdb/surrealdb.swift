@@ -134,3 +134,30 @@ func integration_insertMergePatchRelateAndRanges() async throws {
         }
     }
 }
+
+@Test
+func integration_mergePatchRelateTargetRecordsOverJSON() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    // JSON sends record ids and tables as strings; the statements must still
+    // address the records rather than a string.
+    let client = try SurrealClient(endpoint: httpEndpoint(), wireProtocol: .json)
+    try await client.connect()
+    defer { Task { await client.close() } }
+    try await authenticateIfNeeded(client)
+    try await client.use(namespace: IntegrationEnv.namespace, database: "t_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))
+    _ = try await client.queryRaw("CREATE item:1 SET name = 'a', qty = 1; CREATE item:2 SET name = 'b', qty = 2; CREATE item:3 SET name = 'c', qty = 3;")
+
+    _ = try await client.merge(recordID: item(1), with: ["qty": SurrealValue.int(10)], as: SurrealValue.self)
+    _ = try await client.patch(recordID: item(2), [.replace(path: "/qty", value: .int(20))], as: SurrealValue.self)
+    _ = try await client.relate(item(1), "link", item(2), content: .object(["weight": .int(1)]), as: SurrealValue.self)
+    _ = try await client.relate([item(1)], "link", [item(2), item(3)], content: .object(["weight": .int(2)]), as: SurrealValue.self)
+    // A predicate binding named like the SDK's own keeps its value.
+    let none = try await client.merge(Item.self, with: ["qty": SurrealValue.int(0)], where: SurrealPredicate(raw: "$_sdk_data", bindings: ["_sdk_data": .bool(false)]))
+    #expect(none.isEmpty)
+
+    let qty = try await client.queryRaw("SELECT VALUE qty FROM item ORDER BY id;").first?.result
+    #expect(qty == .array([.int(10), .int(20), .int(3)]))
+    let links = try await client.queryRaw("RETURN count(SELECT * FROM link);").first?.result
+    #expect(links == .int(3))
+}
