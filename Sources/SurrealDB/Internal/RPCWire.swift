@@ -54,6 +54,17 @@ public struct RPCErrorObject: Sendable, Codable {
         self.details = details
         self.cause = cause
     }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        code = try container.decodeIfPresent(Int.self, forKey: .code)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind)
+        message = try container.decode(String.self, forKey: .message)
+        details = try container.decodeIfPresent(SurrealValue.self, forKey: .details)
+        // As over CBOR: a string or null cause mustn't fail the whole error.
+        cause = try container.decodeIfPresent(SurrealValue.self, forKey: .cause)
+            .flatMap(CBORSurrealCodec.decodeRPCCause(from:))
+    }
 }
 
 enum CBORSurrealCodec {

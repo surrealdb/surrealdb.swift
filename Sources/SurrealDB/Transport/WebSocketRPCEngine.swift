@@ -164,9 +164,9 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     /// Methods that change the connection's server-side state. If one times
     /// out or is cancelled, the server may still apply it after the client
     /// has given up and kept its old idea of that state.
-    private static let stateChangingMethods: Set<String> = [
+    static let stateChangingMethods: Set<String> = [
         "use", "signin", "signup", "authenticate", "invalidate", "let", "unset",
-        "reset", "attach", "detach", "begin",
+        "reset", "attach", "detach", "begin", "refresh",
     ]
 
     private func startTimer(for id: String, method: String) {
