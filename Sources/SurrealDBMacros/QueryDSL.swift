@@ -348,6 +348,22 @@ public enum SurrealDSL {
         return .init(sql: sql + ";", bindings: allBindings)
     }
 
+    /// A live query whose notifications carry the change to each record as
+    /// patch operations (`LIVE SELECT DIFF`), rather than the whole record.
+    /// A created record arrives as a single `replace` of the root path.
+    public static func liveDiff<Model: SurrealModel>(
+        _ model: Model.Type,
+        where predicate: SurrealPredicate? = nil,
+        bindings: [String: SurrealValue] = [:]
+    ) -> LiveQuery<[SurrealPatchOperation]> {
+        var sql = "LIVE SELECT DIFF FROM \(SurrealQL.escapeIdent(model.surrealTable))"
+        let (whereRaw, allBindings) = resolve(bindings, predicate)
+        if let whereRaw {
+            sql += " WHERE \(whereRaw)"
+        }
+        return .init(sql: sql + ";", bindings: allBindings)
+    }
+
     /// The predicate's text and the bindings for the whole statement. A
     /// predicate binding that clashes with an explicit one is renamed.
     private static func resolve(

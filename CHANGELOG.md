@@ -26,12 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `relate(_:_:_:content:as:)` creates edges, from one record to another or from each record in one list to each in another.
 - Record ranges: `SurrealRecordRange` with `select(range:as:)`, `merge(range:with:as:)` and `delete(range:as:)`. `SurrealRange` can be built from Swift `Int64` ranges (`1...10`, `1..<10`, `5...`, `..<5`, `...5`).
 - File references: `SurrealValue.file(SurrealFileRef)` for SurrealDB's file values (`f"bucket:/key"`, CBOR tag 55), which used to fail to decode. `SurrealFileRef` fields in Codable types map to it. The integration scripts start the server with the experimental `files` capability.
+- Live queries survive a reconnect: the client re-issues each query it started with `live(_:)`, with its bindings, after replaying the session, and the same `AsyncStream` carries on under the new query id. Streams used to finish on any drop.
+- `liveOf(_:as:)` attaches a stream to a live query that's already running, such as one started with a raw `LIVE SELECT`.
+- `SurrealDSL.liveDiff(_:where:)` builds a `LIVE SELECT DIFF`, whose events decode to `[SurrealPatchOperation]`. `SurrealPatchOperation` is now `Decodable` and gains `.change(path:value:)` for SurrealDB's text diffs.
 
 ### Security
 - Fixed SurrealQL injection in generated queries. Predicate values (`Person.Fields.name == x`) are now sent as bound variables instead of being spliced into the statement; table and field names are always backtick-escaped; record-id operations (`select(recordID:)`, `create(recordID:)` and the rest) send the id as a bound value; and `SurrealValue.sqlLiteral` now escapes backslashes, so a value ending in `\` can no longer close its own string. `SurrealPredicate` gains a `bindings` dictionary, and `SurrealPredicateValue` now requires `surrealPredicateValue: SurrealValue` in place of `surrealPredicateSQL` (source-breaking for custom conformances).
 - Added `SurrealQL.escapeIdent(_:)`, `SurrealQL.escapeFieldPath(_:)` and `SurrealQL.quote(_:)` for callers writing their own SurrealQL.
 
 ### Fixed
+- Live notifications that arrived before `live(_:)` had opened its stream were dropped. The WebSocket engine now holds notifications for live queries with no stream yet (up to 64 queries and 256 notifications each) and delivers them when one opens.
 - An RPC error whose `cause` was NONE or a string failed to decode, and over WebSocket that closed the connection. Such errors now arrive as `SurrealError.serverError`.
 - `update(_:content:)` with no predicate replaced every record in the table with the same content, and `upsert(_:content:)` with no predicate ignored the existing records and inserted a new one on every call. The `where:` argument is now required on both (source-breaking). `updateAll(_:content:)` and `upsertAll(_:content:)` replace every record in the table (`upsertAll` creates one if the table is empty); to keep the old `upsert` behaviour of inserting a record, call `create(_:)` instead.
 - An invalid UUID string (CBOR tag 9) silently decoded to a new random `UUID()`. It now throws `SurrealError.invalidResponse`, as do other malformed tags that used to decode to an invented value (`NULL`, `""`, `0`, an empty set). A malformed value inside a response no longer reads as a missing result.

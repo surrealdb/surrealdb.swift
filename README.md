@@ -351,7 +351,7 @@ Session state is tracked per client instance: `session(id:)` only works for ids 
 
 ### Reconnection behaviour
 
-When the WebSocket reconnects after a drop, the client automatically re-attaches every session and replays its namespace/database selection and authentication. Bound variables live client-side, so they survive reconnects without any replay. Live queries are **not** re-registered — their streams finish when the connection drops and must be re-opened by the caller.
+When the WebSocket reconnects after a drop, the client automatically re-attaches every session and replays its namespace/database selection, authentication and variables. Live queries started with `live(_:)` are re-issued on the new connection and their streams carry on, so don't re-open them; streams from `liveOf(_:as:)` finish, since the SDK doesn't know their query. Notifications sent while the connection was down are lost.
 
 `SurrealSession` conforms to the same `SurrealQueryable`/`SurrealLiveQueryable` protocols as `SurrealClient`, so every query, CRUD, and live-query method shown elsewhere in this README works identically on a session.
 
@@ -585,11 +585,32 @@ for await event in stream {
 }
 ```
 
-Cancel the stream by killing the live query:
+To stop listening, cancel the task iterating the stream, or let go of every reference to the stream: either ends it, and the SDK then kills the live query on the server. `break` on its own isn't enough while something still holds the stream. You can also kill it yourself with `client.kill(liveQueryID: event.queryID)`.
+
+If the WebSocket drops and reconnects, the client re-issues every live query it started with `live(_:)` and keeps the same stream going. Notifications sent while the connection was down are lost, and the server gives the re-issued query a new id, so `event.queryID` changes. If the reconnect fails for good, the streams finish.
+
+#### Diffs
+
+`SurrealDSL.liveDiff` streams the change to each record as patch operations instead of the whole record:
 
 ```swift
-// Capture the queryID from the first event, then:
-try await client.kill(liveQueryID: event.queryID)
+let changes = try await client.live(SurrealDSL.liveDiff(Person.self))
+for await event in changes {
+    for operation in event.decoded ?? [] {
+        print(operation)  // .replace(path: "/age", value: .int(37)), ...
+    }
+}
+```
+
+String fields change by `.change(path:value:)`, which carries a diff-match-patch text diff.
+
+#### Attaching to a running live query
+
+`liveOf` streams the notifications for a live query started some other way, such as a raw `LIVE SELECT`. Notifications that arrived before you attached are delivered first (up to 256 per query). The SDK doesn't know that query, so it can't re-issue it after a reconnect; the stream finishes instead.
+
+```swift
+guard case .uuid(let id)? = try await client.queryRaw("LIVE SELECT * FROM person WHERE age > 18;").first?.result else { return }
+let stream = try await client.liveOf(id, as: Person.self)
 ```
 
 ---

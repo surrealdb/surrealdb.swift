@@ -49,15 +49,47 @@ public struct SurrealRecordRange: Sendable, Hashable, Codable {
     }
 }
 
-/// One JSON Patch (RFC 6902) operation, for `patch(recordID:_:as:)`.
-/// Paths are JSON Pointers into the record, such as `/name` or `/tags/0`.
-public enum SurrealPatchOperation: Sendable, Hashable {
+/// One JSON Patch (RFC 6902) operation, for `patch(recordID:_:as:)` and in
+/// the changes a `LIVE SELECT DIFF` sends. Paths are JSON Pointers into the
+/// record, such as `/name` or `/tags/0`.
+public enum SurrealPatchOperation: Sendable, Hashable, Decodable {
     case add(path: String, value: SurrealValue)
     case remove(path: String)
     case replace(path: String, value: SurrealValue)
     case move(from: String, path: String)
     case copy(from: String, path: String)
     case test(path: String, value: SurrealValue)
+    /// SurrealDB's extension for strings: `value` is a text diff in
+    /// diff-match-patch patch format, applied to the string at `path`.
+    case change(path: String, value: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case op, path, from, value
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let op = try container.decode(String.self, forKey: .op)
+        let path = try container.decode(String.self, forKey: .path)
+        switch op {
+        case "add":
+            self = .add(path: path, value: try container.decode(SurrealValue.self, forKey: .value))
+        case "remove":
+            self = .remove(path: path)
+        case "replace":
+            self = .replace(path: path, value: try container.decode(SurrealValue.self, forKey: .value))
+        case "move":
+            self = .move(from: try container.decode(String.self, forKey: .from), path: path)
+        case "copy":
+            self = .copy(from: try container.decode(String.self, forKey: .from), path: path)
+        case "test":
+            self = .test(path: path, value: try container.decode(SurrealValue.self, forKey: .value))
+        case "change":
+            self = .change(path: path, value: try container.decode(String.self, forKey: .value))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .op, in: container, debugDescription: "Unknown patch operation \(op).")
+        }
+    }
 
     public var surrealValue: SurrealValue {
         switch self {
@@ -73,6 +105,8 @@ public enum SurrealPatchOperation: Sendable, Hashable {
             return .object(["op": .string("copy"), "from": .string(from), "path": .string(path)])
         case .test(let path, let value):
             return .object(["op": .string("test"), "path": .string(path), "value": value])
+        case .change(let path, let value):
+            return .object(["op": .string("change"), "path": .string(path), "value": .string(value)])
         }
     }
 }

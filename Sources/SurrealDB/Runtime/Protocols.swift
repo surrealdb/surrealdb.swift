@@ -99,5 +99,15 @@ public protocol SurrealQueryable: Sendable {
 
 public protocol SurrealLiveQueryable: SurrealQueryable {
     func live<T: Decodable & Sendable>(_ query: LiveQuery<T>) async throws -> AsyncStream<LiveEvent<T>>
+    /// Attaches to a live query already running on this connection. See
+    /// `SurrealClient.liveOf(_:as:)`.
+    func liveOf<T: Decodable & Sendable>(_ queryID: UUID, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>>
     func kill(liveQueryID: UUID) async throws
+}
+
+extension SurrealLiveQueryable {
+    /// For conformers written before `liveOf` existed.
+    public func liveOf<T: Decodable & Sendable>(_ queryID: UUID, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>> {
+        throw SurrealError.unsupportedFeature("\(Self.self) doesn't support liveOf.")
+    }
 }

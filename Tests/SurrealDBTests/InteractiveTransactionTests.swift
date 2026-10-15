@@ -215,6 +215,7 @@ private actor HeldCommitEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
     func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> { AsyncStream { $0.finish() } }
     func closeLiveStream(for queryID: UUID) async {}
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async {}
     func reconnectEvents() -> AsyncStream<Void> { AsyncStream { _ in } }
 }
 
