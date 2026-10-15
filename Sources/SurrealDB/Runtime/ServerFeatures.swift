@@ -16,7 +16,10 @@ public struct SurrealExportOptions: Sendable, Hashable {
     /// Which tables to export, definitions and records.
     public enum Tables: Sendable, Hashable {
         case all
-        case none
+        /// No tables at all. (Not `.none`, which Swift would read as
+        /// `Optional.none` where a `Tables?` is expected, exporting
+        /// everything.)
+        case noTables
         case only([String])
         case excluding([String])
     }
@@ -66,7 +69,7 @@ public struct SurrealExportOptions: Sendable, Hashable {
         var object: [String: Any] = [:]
         switch tables {
         case .all?: object["tables"] = true
-        case .none?: object["tables"] = false
+        case .noTables?: object["tables"] = false
         case .only(let names)?: object["tables"] = names
         case .excluding(let names)?: object["tables"] = ["exclude": names]
         case nil: break

@@ -38,10 +38,14 @@ struct HTTPEndpoints: Sendable {
         )
         switch status {
         case 200..<300:
-            guard !data.isEmpty,
-                  let rows = try? RPCWire.decodeQueryResults(from: CBORSurrealCodec.decodeValue(data))
-            else {
-                return
+            guard !data.isEmpty else { return }
+            // Anything else here must be the result list; a body we can't
+            // read could be hiding failures.
+            let rows: [RPCQueryResult]
+            do {
+                rows = try RPCWire.decodeQueryResults(from: CBORSurrealCodec.decodeValue(data))
+            } catch {
+                throw SurrealError.invalidResponse("Unexpected /import response: \(error)")
             }
             let failed = rows.filter { $0.status == .err }
             if !failed.isEmpty {
