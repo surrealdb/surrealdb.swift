@@ -30,6 +30,11 @@ actor SurrealClientCore {
     func connect() async throws {
         try await engine.connect()
 
+        // Subscribe before anything else awaits: a reconnect during the
+        // version check or session setup below would otherwise be dropped,
+        // leaving the new socket without the session.
+        let reconnects = await (engine as? any LiveRPCEngine)?.reconnectEvents()
+
         do {
             if checkServerVersion {
                 try ServerVersion.check(try await version())
@@ -44,18 +49,13 @@ actor SurrealClientCore {
             throw error
         }
 
-        guard let liveEngine = engine as? any LiveRPCEngine else {
+        guard let reconnects else {
             return
         }
 
-        // Subscribe before returning, not inside the task: otherwise a
-        // reconnect that fires between connect() returning and the task
-        // starting is silently dropped.
-        let stream = await liveEngine.reconnectEvents()
-
         reconnectReplayTask?.cancel()
         reconnectReplayTask = Task { [weak self] in
-            for await _ in stream {
+            for await _ in reconnects {
                 guard let self else { return }
                 await self.beginReplay()
             }
