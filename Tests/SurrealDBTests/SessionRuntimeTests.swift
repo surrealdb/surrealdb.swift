@@ -76,6 +76,8 @@ private actor MockSessionEngine: LiveRPCEngine, SessionCapableRPCEngine {
             return RPCResponseEnvelope(id: request.id, action: nil, result: .array([row]), error: nil)
         case "sessions":
             return RPCResponseEnvelope(id: request.id, action: nil, result: .array(sessionsResult), error: nil)
+        case "begin":
+            return RPCResponseEnvelope(id: request.id, action: nil, result: .uuid(UUID()), error: nil)
         default:
             return RPCResponseEnvelope(id: request.id, action: nil, result: .null, error: nil)
         }
@@ -335,4 +337,22 @@ func core_reconnectDuringConnectSetupIsReplayed() async throws {
     await engine.reconnect(during: "use")
     try await core.connect()
     try await waitUntil { await engine.count(of: "use") == 2 }
+}
+
+@Test
+func core_beginCancelledInFlightCancelsTheTransaction() async throws {
+    let engine = MockSessionEngine()
+    let core = SurrealClientCore(engine: engine)
+    try await core.connect()
+
+    // The server opens the transaction, but the caller is cancelled before
+    // the reply arrives.
+    await engine.holdResponses(for: "begin")
+    let begin = Task { try await core.beginTransaction(session: nil) }
+    try await waitUntil { await engine.count(of: "begin") == 1 }
+    begin.cancel()
+    await engine.releaseResponses(for: "begin")
+
+    await #expect(throws: CancellationError.self) { _ = try await begin.value }
+    try await waitUntil { await engine.count(of: "cancel") == 1 }
 }

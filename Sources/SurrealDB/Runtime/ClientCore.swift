@@ -558,16 +558,28 @@ actor SurrealClientCore {
                 "Interactive transactions need a WebSocket connection. Over HTTP, use transaction { } to send the statements as one BEGIN ... COMMIT query."
             )
         }
-        let response = try await rpc("begin", session: session)
+        // Sent from a task of its own: if the caller is cancelled after the
+        // server has opened the transaction, its id still comes back, and the
+        // transaction is cancelled rather than left open. (A timeout resets
+        // the socket, which ends every transaction on it.)
+        let response = try await Task { try await self.rpc("begin", session: session) }.value
+        var opened: UUID?
         switch response {
         case .uuid(let id):
-            return id
+            opened = id
         case .string(let text):
-            if let id = UUID(uuidString: text) { return id }
+            opened = UUID(uuidString: text)
         default:
             break
         }
-        throw SurrealError.invalidResponse("Expected a transaction id from begin, got \(response.kindName).")
+        guard let id = opened else {
+            throw SurrealError.invalidResponse("Expected a transaction id from begin, got \(response.kindName).")
+        }
+        if Task.isCancelled {
+            _ = await Task { try? await self.rpc("cancel", params: [.uuid(id)], session: session) }.value
+            throw CancellationError()
+        }
+        return id
     }
 
     func commitTransaction(_ id: UUID, session: SessionID?) async throws {
