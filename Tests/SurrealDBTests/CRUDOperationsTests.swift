@@ -160,4 +160,19 @@ func integration_mergePatchRelateTargetRecordsOverJSON() async throws {
     #expect(qty == .array([.int(10), .int(20), .int(3)]))
     let links = try await client.queryRaw("RETURN count(SELECT * FROM link);").first?.result
     #expect(links == .int(3))
+
+    // Record ranges, and edges inserted from values.
+    let range = SurrealRecordRange(table: "item", range: SurrealRange(2...3))
+    #expect(try await client.select(range: range, as: SurrealValue.self).count == 2)
+    #expect(try await client.merge(range: range, with: ["flag": true], as: SurrealValue.self).count == 2)
+    _ = try await client.insertRelation([Link(id: nil, from: item(3), to: item(1), weight: 5)])
+    #expect(try await client.queryRaw("RETURN count(SELECT * FROM link WHERE weight = 5);").first?.result == .int(1))
+    #expect(try await client.delete(range: SurrealRecordRange(table: "item", range: SurrealRange(3...)), as: SurrealValue.self).count == 1)
+}
+
+@Test
+func recordRange_rendersAsSurrealQL() {
+    #expect(SurrealRecordRange(table: "item", range: SurrealRange(2...4)).surrealValue.sqlLiteral == "item:2..=4")
+    #expect(SurrealRecordRange(table: "sr", begin: .excluded(.string("a")), end: .unbounded).surrealValue.sqlLiteral == "sr:`a`>..")
+    #expect(SurrealRecordRange(table: "sr", begin: .unbounded, end: .excluded(.string("b"))).surrealValue.sqlLiteral == "sr:..`b`")
 }

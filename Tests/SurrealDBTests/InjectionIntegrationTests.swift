@@ -73,3 +73,22 @@ func integration_noneAndBytesPredicatesMatchOverEveryCodec() async throws {
         #expect(ff.compactMap(\.key) == ["ff"], "\(wire)")
     }
 }
+
+@Test
+func integration_fieldPathsAndNestedTypedValues() async throws {
+    guard IntegrationEnv.enabled else { return }
+
+    for wire in [SurrealWireProtocol.cbor, .json] {
+        let client = try SurrealClient(endpoint: httpEndpoint(), wireProtocol: wire)
+        try await client.connect()
+        defer { Task { await client.close() } }
+        try await authenticateIfNeeded(client)
+        try await client.use(namespace: IntegrationEnv.namespace, database: "t_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))
+        _ = try await client.queryRaw("CREATE nick:a SET results = [{ score: 5 }], at = [d'1970-01-01T00:00:00Z']; CREATE nick:b SET results = [{ score: 7 }];")
+
+        let byIndex = try await client.select(Nick.self, where: SurrealField<Nick, Int>("results[0].score") == 7)
+        #expect(byIndex.compactMap(\.key) == ["b"], "\(wire)")
+        let byDates = try await client.select(Nick.self, where: SurrealField<Nick, SurrealValue>("at") == .array([.datetime(Date(timeIntervalSince1970: 0))]))
+        #expect(byDates.compactMap(\.key) == ["a"], "\(wire)")
+    }
+}
