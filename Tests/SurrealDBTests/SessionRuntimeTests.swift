@@ -268,11 +268,13 @@ func core_reconnectReplayRestoresStateWithoutDeadlockingAndGatesCalls() async th
     )
     try await core.connect()
     try await waitUntil { await engine.hasSubscriber() }
+    // connect() applies the initial context: one use and one authenticate.
+    #expect(await engine.methods() == ["use", "authenticate"])
 
     // Park the replay's first RPC so we can observe the gate deterministically.
     await engine.holdResponses(for: "use")
     await engine.fireReconnect()
-    try await waitUntil { await engine.count(of: "use") == 1 }
+    try await waitUntil { await engine.count(of: "use") == 2 }
 
     // A call issued mid-replay must wait behind the replay, not race it.
     let query = Task {
@@ -290,7 +292,7 @@ func core_reconnectReplayRestoresStateWithoutDeadlockingAndGatesCalls() async th
     #expect(rows.count == 1)
 
     let methods = await engine.methods()
-    #expect(methods == ["use", "authenticate", "query"])
+    #expect(methods == ["use", "authenticate", "use", "authenticate", "query"])
 }
 
 @Test

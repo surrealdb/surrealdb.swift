@@ -183,6 +183,16 @@ struct SurrealValueDecoder: Decoder {
         }
     }
 
+    /// A finite double too large for `Float` would silently become infinity.
+    static func unboxFloat(_ value: SurrealValue, _ codingPath: [any CodingKey]) throws -> Float {
+        let double = try unboxDouble(value, codingPath)
+        let float = Float(double)
+        guard float.isFinite || !double.isFinite else {
+            throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "\(double) is out of range for Float."))
+        }
+        return float
+    }
+
     private static func unboxDate(_ value: SurrealValue, _ codingPath: [any CodingKey]) throws -> Date {
         switch value {
         case .datetime(let date):
@@ -228,14 +238,26 @@ struct SurrealValueDecoder: Decoder {
     private static func unboxDecimal(_ value: SurrealValue, _ codingPath: [any CodingKey]) throws -> Decimal {
         switch value {
         case .decimal(let text), .string(let text):
-            if let decimal = Decimal(string: text, locale: Locale(identifier: "en_US_POSIX")) {
+            // Decimal(string:) accepts a numeric prefix ("12.5oops" is 12.5),
+            // so check the whole text first.
+            if SurrealValue.isDecimalText(text),
+               let decimal = Decimal(string: text, locale: Locale(identifier: "en_US_POSIX")), !decimal.isNaN {
                 return decimal
             }
             throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "Invalid decimal: \(text)"))
         case .int(let int):
             return Decimal(int)
         case .double(let double):
-            return Decimal(double)
+            // Decimal(Double) traps for infinities on Linux and gives NaN for
+            // values beyond its range.
+            guard double.isFinite else {
+                throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "\(double) can't be a Decimal."))
+            }
+            let decimal = Decimal(double)
+            guard !decimal.isNaN else {
+                throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "\(double) is out of range for Decimal."))
+            }
+            return decimal
         default:
             throw mismatch(Decimal.self, value, codingPath)
         }
@@ -283,9 +305,11 @@ struct SurrealValueDecoder: Decoder {
             return value
         }
 
+        /// Throws `keyNotFound` for a missing key, as `JSONDecoder` does;
+        /// `decodeIfPresent` checks `contains` first.
         func decodeNil(forKey key: Key) throws -> Bool {
-            switch object[key.stringValue] {
-            case .none, .some(.null), .some(.none):
+            switch try value(for: key) {
+            case .null, .none:
                 return true
             default:
                 return false
@@ -382,7 +406,7 @@ struct SurrealValueDecoder: Decoder {
         func decode(_ type: Bool.Type) throws -> Bool { try unboxBool(value, codingPath) }
         func decode(_ type: String.Type) throws -> String { try unboxString(value, codingPath) }
         func decode(_ type: Double.Type) throws -> Double { try unboxDouble(value, codingPath) }
-        func decode(_ type: Float.Type) throws -> Float { Float(try unboxDouble(value, codingPath)) }
+        func decode(_ type: Float.Type) throws -> Float { try unboxFloat(value, codingPath) }
         func decode(_ type: Int.Type) throws -> Int { try unboxInteger(value, as: type, codingPath) }
         func decode(_ type: Int8.Type) throws -> Int8 { try unboxInteger(value, as: type, codingPath) }
         func decode(_ type: Int16.Type) throws -> Int16 { try unboxInteger(value, as: type, codingPath) }
@@ -516,8 +540,12 @@ final class SurrealValueEncoder: Encoder {
         let codingPath: [any CodingKey]
 
         private func set(_ value: Box, for key: Key) {
+            set(value, named: key.stringValue)
+        }
+
+        private func set(_ value: Box, named name: String) {
             guard case .object(var entries) = box.kind else { return }
-            entries[key.stringValue] = value
+            entries[name] = value
             box.kind = .object(entries)
         }
 
@@ -549,14 +577,20 @@ final class SurrealValueEncoder: Encoder {
             return UnkeyedContainer(box: nested, codingPath: codingPath + [key])
         }
 
+        /// Uses its own `"super"` key: the model's `CodingKeys` usually has no
+        /// such case, so `Key(stringValue: "super")` can't be relied on.
         mutating func superEncoder() -> any Encoder {
-            superEncoder(forKey: Key(stringValue: "super")!)
+            superEncoder(named: "super", key: SurrealCodingKey(stringValue: "super"))
         }
 
         mutating func superEncoder(forKey key: Key) -> any Encoder {
+            superEncoder(named: key.stringValue, key: key)
+        }
+
+        private mutating func superEncoder(named name: String, key: any CodingKey) -> any Encoder {
             let encoder = SurrealValueEncoder(codingPath: codingPath + [key])
             let placeholder = Box(.value(.object([:])))
-            set(placeholder, for: key)
+            set(placeholder, named: name)
             // Resolved lazily: the super encoder is filled after this returns.
             encoder.storage = placeholder
             return ReferencingEncoder(encoder: encoder, slot: placeholder)
