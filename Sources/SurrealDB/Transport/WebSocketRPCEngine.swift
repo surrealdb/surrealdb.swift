@@ -297,6 +297,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         }
 
         liveContinuations[liveEvent.queryID]?.yield(liveEvent)
+        if liveEvent.action == .killed {
+            // KILLED is the last notification for this id.
+            liveContinuations.removeValue(forKey: liveEvent.queryID)?.finish()
+        }
     }
 
     // MARK: - Reconnect

@@ -507,19 +507,30 @@ extension SurrealClientCore {
         let queryID = try await registerLiveQuery(query, session: session)
         let wireStream = await liveEngine.openLiveStream(for: queryID)
 
+        let killed = KilledFlag()
         return AsyncStream { continuation in
             let forwardTask = Task {
                 for await event in wireStream {
-                    let decoded = try? event.payload.decode(T.self)
+                    let decoded = event.action == .killed ? nil : try? event.payload.decode(T.self)
+                    var record: SurrealRecordID?
+                    if case .recordID(let id)? = event.record {
+                        record = id
+                    }
                     continuation.yield(
                         LiveEvent(
                             queryID: event.queryID,
                             action: event.action,
                             recordID: event.recordID,
+                            record: record,
                             rawPayload: event.payload,
                             decoded: decoded
                         )
                     )
+                    if event.action == .killed {
+                        // The server has already dropped it; don't KILL again.
+                        killed.set()
+                        break
+                    }
                 }
                 continuation.finish()
             }
@@ -527,7 +538,9 @@ extension SurrealClientCore {
             continuation.onTermination = { [queryID] _ in
                 forwardTask.cancel()
                 Task {
-                    try? await self.kill(liveQueryID: queryID, session: session)
+                    if !killed.isSet {
+                        try? await self.kill(liveQueryID: queryID, session: session)
+                    }
                     await liveEngine.closeLiveStream(for: queryID)
                 }
             }
@@ -563,5 +576,23 @@ extension SurrealClientCore {
         default:
             throw SurrealError.invalidResponse("Unexpected live query registration format.")
         }
+    }
+}
+
+/// Set once a live stream has seen `KILLED`.
+private final class KilledFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
     }
 }

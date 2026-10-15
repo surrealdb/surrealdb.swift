@@ -531,6 +531,16 @@ private extension UUID {
 struct LiveWireEvent: Sendable {
     let queryID: UUID
     let action: LiveAction
-    let recordID: String
+    /// The record the notification is about; `nil` for `KILLED`.
+    let record: SurrealValue?
     let payload: SurrealValue
+
+    /// The record id as text, or `""` when there isn't one.
+    var recordID: String {
+        switch record {
+        case .recordID(let id)?: id.rawValue
+        case .string(let text)?: text
+        default: ""
+        }
+    }
 }
