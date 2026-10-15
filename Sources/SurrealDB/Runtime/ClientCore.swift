@@ -58,6 +58,19 @@ actor SurrealClientCore {
         }
         isConnected = true
 
+        // This call may have replaced an earlier connection (say, while it
+        // was waiting to reconnect). Bring its sessions and live queries
+        // across before returning, as a reconnect would.
+        if serverKeepsState {
+            for (id, context) in sessions {
+                try? await sendAttach(id)
+                await replay(session: id, context: context)
+            }
+        }
+        if !liveSubscriptions.isEmpty {
+            await resubscribeLiveQueries()
+        }
+
         guard let reconnects else {
             return
         }
