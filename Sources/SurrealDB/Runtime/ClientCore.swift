@@ -347,7 +347,9 @@ actor SurrealClientCore {
         session: SessionID?
     ) async throws -> [Model] {
         let payload = try SurrealValue.fromEncodable(content)
-        let query = SurrealDSL.upsert(model, where: predicate, bindings: ["content": payload])
+        // A table-wide UPSERT with no WHERE inserts one new record rather
+        // than touching the existing ones; `WHERE true` updates them all.
+        let query = SurrealDSL.upsert(model, where: predicate ?? SurrealPredicate(raw: "true"), bindings: ["content": payload])
         return try await self.query(query, session: session)
     }
 
