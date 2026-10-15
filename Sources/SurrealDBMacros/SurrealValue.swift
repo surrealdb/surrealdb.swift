@@ -9,8 +9,20 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         self.id = id
     }
 
+    /// The record id as SurrealQL text, escaped the way the server renders
+    /// it (`person:alice`, ``person:`123` ``, `person:u'…'`). For display;
+    /// the SDK itself sends record ids as bound values.
     public var rawValue: String {
-        "\(table):\(id.sqlLiteral)"
+        "\(SurrealQL.displayIdent(table)):\(idText)"
+    }
+
+    private var idText: String {
+        switch id {
+        case .string(let value):
+            return SurrealQL.displayIdent(value)
+        default:
+            return id.sqlLiteral
+        }
     }
 }
 
@@ -228,6 +240,9 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         }
     }
 
+    /// The value as a SurrealQL literal. Strings are quoted and escaped, and
+    /// identifiers are backtick-escaped, so the result is always a single
+    /// value. Prefer bound variables over splicing this into a query.
     public var sqlLiteral: String {
         switch self {
         case .none:
@@ -239,21 +254,23 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .int(let value):
             return "\(value)"
         case .double(let value):
-            return "\(value)"
+            if value.isNaN { return "math::nan" }
+            if value.isInfinite { return value > 0 ? "math::inf" : "math::neg_inf" }
+            return "\(value)f"
         case .string(let value):
-            return "\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
+            return SurrealQL.quote(value)
         case .bytes(let value):
-            return "<bytes>\"\(value.base64EncodedString())\""
+            return "encoding::base64::decode(\(SurrealQL.quote(value.base64EncodedString())))"
         case .datetime(let value):
-            return "d\"\(ISO8601DateFormatter().string(from: value))\""
+            return "d\(SurrealQL.quote(SurrealValue.iso8601Fractional(value)))"
         case .uuid(let value):
-            return "u\"\(value.uuidString.lowercased())\""
+            return "u\(SurrealQL.quote(value.uuidString.lowercased()))"
         case .decimal(let value):
-            return "\(value)dec"
+            return SurrealValue.isDecimalText(value) ? "\(value)dec" : "<decimal>\(SurrealQL.quote(value))"
         case .duration(let value):
-            return value
+            return SurrealValue.isDurationText(value) ? value : "<duration>\(SurrealQL.quote(value))"
         case .table(let value):
-            return value
+            return "type::table(\(SurrealQL.quote(value)))"
         case .recordID(let value):
             return value.rawValue
         case .range:
@@ -266,10 +283,26 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .object(let value):
             let entries = value.map { key, value in
-                "\(key): \(value.sqlLiteral)"
+                "\(SurrealQL.quote(key)): \(value.sqlLiteral)"
             }.sorted()
             return "{" + entries.joined(separator: ", ") + "}"
         }
+    }
+
+    static func iso8601Fractional(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    /// `-?digits[.digits][e[+-]digits]`.
+    static func isDecimalText(_ text: String) -> Bool {
+        text.range(of: #"^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$"#, options: .regularExpression) != nil
+    }
+
+    /// One or more `<digits><unit>` parts, e.g. `1h30m`.
+    static func isDurationText(_ text: String) -> Bool {
+        text.range(of: #"^([0-9]+(ns|us|µs|ms|s|m|h|d|w|y))+$"#, options: .regularExpression) != nil
     }
 }
 

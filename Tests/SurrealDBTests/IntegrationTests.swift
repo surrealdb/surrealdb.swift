@@ -30,7 +30,7 @@ private struct IntegrationLivePerson: SurrealModel, Codable, Sendable {
     }
 }
 
-private enum IntegrationEnv {
+enum IntegrationEnv {
     static func value(_ key: String) -> String? {
         let raw = ProcessInfo.processInfo.environment[key]
         guard let raw, !raw.isEmpty else { return nil }
@@ -87,11 +87,11 @@ private enum IntegrationEnv {
     }
 }
 
-private func wsEndpoint() -> String { IntegrationEnv.endpoint(scheme: "ws") }
-private func httpEndpoint() -> String { IntegrationEnv.endpoint(scheme: "http") }
-private func shouldSkipSignin() -> Bool { !IntegrationEnv.hasCredentials }
+func wsEndpoint() -> String { IntegrationEnv.endpoint(scheme: "ws") }
+func httpEndpoint() -> String { IntegrationEnv.endpoint(scheme: "http") }
+func shouldSkipSignin() -> Bool { !IntegrationEnv.hasCredentials }
 
-private func authenticateIfNeeded(_ client: some SurrealQueryable) async throws {
+func authenticateIfNeeded(_ client: some SurrealQueryable) async throws {
     guard let user = IntegrationEnv.user, let password = IntegrationEnv.password else {
         return
     }
@@ -116,7 +116,7 @@ private func authenticateIfNeeded(_ client: some SurrealQueryable) async throws 
     _ = try await client.signin(credentials)
 }
 
-private func awaitTaskValue<T: Sendable>(
+func awaitTaskValue<T: Sendable>(
     _ task: Task<T, Error>,
     timeoutSeconds: Double,
     timeoutMessage: String
@@ -140,7 +140,7 @@ private func awaitTaskValue<T: Sendable>(
     }
 }
 
-private func assertAllOK(_ rows: [RPCQueryResult]) {
+func assertAllOK(_ rows: [RPCQueryResult]) {
     #expect(!rows.isEmpty)
     for row in rows {
         #expect(row.status == .ok)

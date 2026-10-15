@@ -24,5 +24,7 @@ func surrealPredicate_buildsExpectedSQL() {
 
     let predicate = (SurrealField<Model, Int>("age") >= 21) && (SurrealField<Model, String>("name") == "Alice")
 
-    #expect(predicate.raw == "(age >= 21 AND name = \"Alice\")")
+    // Values are bound, never spliced into the statement text.
+    #expect(predicate.raw.range(of: #"^\(`age` >= \$_pv\d+ AND `name` = \$_pv\d+\)$"#, options: .regularExpression) != nil)
+    #expect(Set(predicate.bindings.values) == [.int(21), .string("Alice")])
 }
