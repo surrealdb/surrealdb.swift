@@ -6,7 +6,12 @@ actor SurrealClientCore {
     private var sessions: [SessionID: SessionContext] = [:]
     private var reconnectReplayTask: Task<Void, Never>?
     private var activeReplay: Task<Void, Never>?
-    private let http: HTTPEndpoints?
+    let http: HTTPEndpoints?
+    /// Between a successful `connect()` and `close()`. The engines track
+    /// this themselves; it's here for the raw HTTP routes, which bypass them.
+    private(set) var isConnected = false
+    /// Bumped by `close()`, so a `connect()` it interrupted can tell.
+    private var closeCount = 0
     private let checkServerVersion: Bool
 
     init(
@@ -28,6 +33,9 @@ actor SurrealClientCore {
     }
 
     func connect() async throws {
+        // Connected again only once this attempt succeeds.
+        isConnected = false
+        let closes = closeCount
         try await engine.connect()
 
         // Subscribe before anything else awaits: a reconnect during the
@@ -48,6 +56,11 @@ actor SurrealClientCore {
             await engine.close()
             throw error
         }
+        // close() ran while this was waiting on the server.
+        guard closes == closeCount else {
+            throw SurrealError.notConnected
+        }
+        isConnected = true
 
         guard let reconnects else {
             return
@@ -63,6 +76,8 @@ actor SurrealClientCore {
     }
 
     func close() async {
+        isConnected = false
+        closeCount += 1
         reconnectReplayTask?.cancel()
         reconnectReplayTask = nil
         await engine.close()
@@ -70,7 +85,7 @@ actor SurrealClientCore {
 
     // MARK: - Session state lookup/mutation
 
-    private func sessionContext(for session: SessionID?) throws -> SessionContext {
+    func sessionContext(for session: SessionID?) throws -> SessionContext {
         guard let session else {
             return rootSession
         }
@@ -598,7 +613,7 @@ actor SurrealClientCore {
         _ = try await rpc("kill", params: [.uuid(liveQueryID)], session: session)
     }
 
-    private func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil, anonymous: Bool = false) async throws -> SurrealValue {
+    func rpc(_ method: String, params: [SurrealValue]? = nil, session: SessionID?, txn: UUID? = nil, anonymous: Bool = false) async throws -> SurrealValue {
         if let activeReplay {
             await activeReplay.value
         }
@@ -668,14 +683,8 @@ actor SurrealClientCore {
 
         for (index, row) in results.enumerated() {
             if row.status == .err {
-                let message: String
-                if case .string(let queryError) = row.result {
-                    message = queryError
-                } else {
-                    message = "Unknown query error"
-                }
                 errors.append(
-                    QueryErrorDetail(index: index, message: message, kind: row.kind, details: row.details)
+                    QueryErrorDetail(index: index, message: row.errorMessage, kind: row.kind, details: row.details)
                 )
                 continue
             }

@@ -108,6 +108,11 @@ enum CBORSurrealCodec {
         return try CBORSerialization.data(from: .map(map))
     }
 
+    /// Decodes a CBOR body that holds a single value.
+    static func decodeValue(_ data: Data) throws -> SurrealValue {
+        try fromCBOR(CBORSerialization.cbor(from: data))
+    }
+
     static func decodeRPCEnvelope(_ data: Data) throws -> RPCResponseEnvelope {
         let cbor = try CBORSerialization.cbor(from: data)
         guard case .map(let map) = cbor else {

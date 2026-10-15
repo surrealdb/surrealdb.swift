@@ -187,6 +187,50 @@ public actor SurrealClient: SurrealLiveQueryable {
         try await core.transaction(build, session: nil)
     }
 
+    /// Calls a server-side function by name, such as `fn::greet` or
+    /// `string::len`, with `arguments`. `version` picks a version of a
+    /// `DEFINE MODEL` function.
+    public func run(_ name: String, version: String? = nil, arguments: [SurrealValue] = []) async throws -> SurrealValue {
+        try await core.run(name, version: version, arguments: arguments, session: nil)
+    }
+
+    /// Calls a server-side function and decodes its result as `T`.
+    public func run<T: Decodable>(
+        _ name: String,
+        version: String? = nil,
+        arguments: [SurrealValue] = [],
+        as type: T.Type
+    ) async throws -> T {
+        try await core.run(name, version: version, arguments: arguments, session: nil).decode(type)
+    }
+
+    /// Calls a `DEFINE API` endpoint on the selected database. A path with
+    /// no matching endpoint returns status 404 rather than throwing.
+    public func api(
+        _ path: String,
+        method: SurrealAPIMethod = .get,
+        body: SurrealValue? = nil,
+        headers: [String: String] = [:],
+        query: [String: String] = [:]
+    ) async throws -> SurrealAPIResponse {
+        try await core.api(path, method: method, body: body, headers: headers, query: query, session: nil)
+    }
+
+    /// Runs a SurrealQL dump, such as one from `export()`, against the
+    /// selected database over HTTP (`POST /import`). The dump must start
+    /// with `OPTION IMPORT;`, as exports do. The import isn't transactional:
+    /// if some statements fail, the rest still apply and this throws
+    /// `SurrealError.importFailed` listing the failures.
+    public func `import`(_ sql: String) async throws {
+        try await core.importSQL(sql, session: nil)
+    }
+
+    /// Exports the selected database as SurrealQL over HTTP (`/export`).
+    /// With no options, everything is exported.
+    public func export(_ options: SurrealExportOptions? = nil) async throws -> String {
+        try await core.export(options, session: nil)
+    }
+
     /// Opens an interactive transaction: statements sent through the returned
     /// handle run inside it until you call `commit()` or `cancel()`.
     /// WebSocket only; throws `SurrealError.unsupportedFeature` over HTTP.
