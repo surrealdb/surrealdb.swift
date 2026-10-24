@@ -74,3 +74,14 @@ func integration_fileRefsRoundTripThroughTheServer() async throws {
         #expect(stored == [Document(name: "hello", file: file)])
     }
 }
+
+@Test
+func fileRef_requestsStayWithinWhatFourPointZeroReads() throws {
+    let file = SurrealFileRef(bucket: "docs", key: "/reports/q1.pdf")
+    let request = try CBORSurrealCodec.encode(RPCRequest(
+        id: "1", method: "query", params: [.object(["file": .file(file)]), .array([.file(file)])], session: nil, txn: nil
+    ))
+    let audit = CBORRequestAudit(request)
+    #expect(audit.problems.isEmpty, "\(audit.problems)")
+    #expect(audit.tags == [55])
+}
