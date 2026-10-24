@@ -57,8 +57,25 @@ func duration_encodesAsSecondsNanos() {
     #expect(CBORSurrealCodec.toCBOR(.duration("1h30m")) == .tagged(tag, .array([.unsignedInt(5400)])))
     #expect(CBORSurrealCodec.toCBOR(.duration("1s500ms")) == .tagged(tag, .array([.unsignedInt(1), .unsignedInt(500_000_000)])))
     #expect(CBORSurrealCodec.toCBOR(.duration("0s")) == .tagged(tag, .array([])))
-    // Text that isn't a duration is passed through for the server to reject.
-    #expect(CBORSurrealCodec.toCBOR(.duration("soon")) == .tagged(CBORSurrealCodec.tagStringDuration, .utf8String("soon")))
+}
+
+@Test
+func duration_textThatIsNotADurationFailsToEncode() throws {
+    // Tag 13 (a duration as text) is refused by SurrealDB 4.0, so the SDK
+    // reports the bad text itself instead of sending it for the server to reject.
+    for text in ["soon", "", "1h 30m", "-5s", "1x", "99999999999999999999y"] {
+        let nested: SurrealValue = .array([.object(["d": .duration(text)])])
+        #expect(throws: EncodingError.self) {
+            _ = try CBORSurrealCodec.encode(RPCRequest(id: "1", method: "query", params: [nested], session: nil, txn: nil))
+        }
+    }
+    // Valid text still encodes, as tag 14.
+    let ok = try CBORSurrealCodec.encode(RPCRequest(id: "1", method: "query", params: [.duration("1h30m")], session: nil, txn: nil))
+    guard case .map(let request) = try CBORSerialization.cbor(from: ok) else {
+        Issue.record("Expected a request map")
+        return
+    }
+    #expect(request[.utf8String("params")] == .array([.tagged(CBORSurrealCodec.tagCustomDuration, .array([.unsignedInt(5400)]))]))
 }
 
 @Test
