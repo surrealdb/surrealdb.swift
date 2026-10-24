@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `SurrealQL.escapeIdent(_:)`, `SurrealQL.escapeFieldPath(_:)` and `SurrealQL.quote(_:)` for callers writing their own SurrealQL.
 
 ### Fixed
-- Durations decoded as `""`. The server sends tag 14 as `[seconds, nanoseconds]`, and the SDK only read a string; it now decodes that form into the server's canonical text (`1h30m`), and sends `.duration` values in the same form. Malformed duration tags now throw instead of decoding to an empty string. New `SurrealValue.duration(seconds:nanoseconds:)` and `durationComponents` convert between the two.
+- Durations decoded as `""`. The server sends tag 14 as `[seconds, nanoseconds]`, and the SDK only read a string; it now decodes that form into the server's canonical text (`1h30m`), and sends `.duration` values in the same form. Malformed duration tags now throw instead of decoding to an empty string. A `.duration` whose text isn't a duration now fails to encode with `EncodingError` instead of being sent as tag 13 (a duration as text), which SurrealDB 4.0 refuses. New `SurrealValue.duration(seconds:nanoseconds:)` and `durationComponents` convert between the two.
 
 ## [1.0.0]
 ### Changed
