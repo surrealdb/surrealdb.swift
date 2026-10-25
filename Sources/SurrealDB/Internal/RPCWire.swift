@@ -192,10 +192,12 @@ enum CBORSurrealCodec {
             return .tagged(tagStringDecimal, .utf8String(value))
         case .duration(let value):
             // The server's own form: [seconds, nanoseconds], trailing zeros
-            // dropped. `checkEncodable` refuses text that doesn't parse
-            // before it gets here; tag 13, the text form, is refused from
-            // 4.0 on.
-            let (seconds, nanos) = SurrealValue.duration(value).durationComponents ?? (0, 0)
+            // dropped. Never tag 13 (a duration as text): SurrealDB 4.0
+            // refuses it. Text that isn't a duration can't be sent, so
+            // `encode` throws for it (`checkEncodable`) before getting here.
+            guard let (seconds, nanos) = SurrealValue.duration(value).durationComponents else {
+                return .utf8String(value)
+            }
             switch (seconds, nanos) {
             case (0, 0):
                 return .tagged(tagCustomDuration, .array([]))
@@ -643,15 +645,17 @@ enum CBORSurrealCodec {
         return unix >= Double(datetimeSeconds.lowerBound) && unix <= Double(datetimeSeconds.upperBound)
     }
 
-    /// Throws for a value anywhere in `value` that has no CBOR form the
-    /// server accepts: a datetime tag 12 can't carry, duration text that
-    /// doesn't parse, or a decimal that isn't one.
+    /// Throws for a value anywhere in `value` that has no wire form 4.0
+    /// accepts: a datetime tag 12 can't carry, a duration whose text doesn't
+    /// parse, or a decimal that isn't one. Tag 13 (a duration as text) used
+    /// to carry the bad duration for the server to reject; 4.0 refuses that
+    /// tag outright, so the SDK reports it itself.
     static func checkEncodable(_ value: SurrealValue) throws {
         switch value {
         case .datetime(let date) where !canEncode(date):
             throw EncodingError.invalidValue(date, .init(codingPath: [], debugDescription: "\(date) is out of range for a SurrealDB datetime."))
         case .duration(let text) where value.durationComponents == nil:
-            throw EncodingError.invalidValue(text, .init(codingPath: [], debugDescription: "\(text) is not a SurrealDB duration."))
+            throw EncodingError.invalidValue(text, .init(codingPath: [], debugDescription: "\"\(text)\" is not a valid SurrealDB duration (for example 1h30m, 500ms, 2w)."))
         case .decimal(let text) where !(SurrealValue.isDecimalText(text) && DecimalText.fits(text)):
             throw EncodingError.invalidValue(text, .init(codingPath: [], debugDescription: "\(text) is not a SurrealDB decimal."))
         case .array(let values), .set(let values):
