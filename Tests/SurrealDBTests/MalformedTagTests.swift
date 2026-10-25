@@ -14,9 +14,9 @@ func malformedTags_invalidStringUUIDThrowsInsteadOfRandom() throws {
     // This used to decode to a brand-new random UUID.
     #expect(throws: SurrealError.self) { try decode(.tagged(tag, .utf8String("not-a-uuid"))) }
     #expect(throws: SurrealError.self) { try decode(.tagged(tag, .unsignedInt(1))) }
-
-    let uuid = UUID()
-    #expect(try decode(.tagged(tag, .utf8String(uuid.uuidString.lowercased()))) == .uuid(uuid))
+    // Servers send UUIDs in tag 37, and 4.0 refuses the text form even when
+    // it's valid.
+    #expect(throws: SurrealError.self) { try decode(.tagged(tag, .utf8String(UUID().uuidString.lowercased()))) }
 }
 
 @Test

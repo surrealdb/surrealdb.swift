@@ -173,6 +173,13 @@ struct SurrealValueDecoder: Decoder {
             result = T(exactly: double)
         case .decimal(let text):
             result = T(text)
+        case .sized(let number):
+            switch number {
+            case .f16, .f32:
+                result = T(exactly: number.doubleValue)
+            default:
+                result = number.integer(as: T.self)
+            }
         default:
             throw mismatch(T.self, value, codingPath)
         }
@@ -191,6 +198,8 @@ struct SurrealValueDecoder: Decoder {
             return double
         case .int(let int):
             return Double(int)
+        case .sized(let number):
+            return number.doubleValue
         case .decimal(let text):
             // Double("1e1000") is infinity, not nil.
             guard let double = Double(text), double.isFinite else { throw mismatch(Double.self, value, codingPath) }
@@ -264,6 +273,8 @@ struct SurrealValueDecoder: Decoder {
             throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "Invalid decimal: \(text)"))
         case .int(let int):
             return Decimal(int)
+        case .sized(let number):
+            return try unboxDecimal(number.widened, codingPath)
         case .double(let double):
             // Decimal(Double) traps for infinities on Linux and gives NaN for
             // values beyond its range.
@@ -742,6 +753,7 @@ extension SurrealValue {
         case .bool: "bool"
         case .int: "int"
         case .double: "float"
+        case .sized(let value): value.kindName
         case .string: "string"
         case .bytes: "bytes"
         case .datetime: "datetime"

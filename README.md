@@ -182,6 +182,24 @@ let json = try SurrealClient(
 
 The wire protocol controls both the HTTP `Content-Type` and the WebSocket sub-protocol negotiated during the handshake.
 
+#### `cbor.2` and sized numbers
+
+SurrealDB 4.0 adds sized numbers (`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `u64`, `f16` and `f32`) and a CBOR dialect, `cbor.2`, that carries them. Plain `cbor` widens them: the integers arrive as `int` (a `u64` above `Int64.max` as a decimal) and the floats as `float`.
+
+The client asks for `cbor.2` and falls back to `cbor`:
+
+- Over WebSocket it offers the sub-protocols `cbor.2` and `cbor`, and uses the one the server picks.
+- Over HTTP it sends plain `cbor` with `Accept: application/cbor; v=2`. Once a response comes back as `v=2`, it sends `v=2` too.
+
+Servers before 4.0 pick plain `cbor`, so nothing changes for them. On `cbor.2`, sized numbers decode to `SurrealValue.sized(SurrealSizedNumber)`, and `.sized` values you send keep their width. Over `cbor` and JSON the client widens them, as the server does. To always use plain `cbor`:
+
+```swift
+let client = try SurrealClient(
+    endpoint: "ws://localhost:8000",
+    options: SurrealClientOptions(negotiatesCBOR2: false)
+)
+```
+
 ### Selecting a Namespace and Database
 
 ```swift
@@ -780,6 +798,7 @@ let v: SurrealValue = .uuid(UUID())
 let v: SurrealValue = .datetime(Date())
 let v: SurrealValue = .recordID(SurrealRecordID(table: "person", id: .string("ada")))
 let v: SurrealValue = .file(SurrealFileRef(bucket: "docs", key: "/report.pdf"))  // f"docs:/report.pdf"
+let v: SurrealValue = .sized(.u8(5))  // 5u8, SurrealDB 4.0 (see cbor.2 above)
 
 // Convert any Encodable to SurrealValue
 let value = try SurrealValue.fromEncodable(myStruct)
@@ -802,7 +821,8 @@ Applies to both HTTP and WebSocket clients:
 SurrealClientOptions(
     requestTimeout: 20,        // seconds, default 20
     pingInterval: 30,          // seconds, default 30
-    checkServerVersion: true   // default true
+    checkServerVersion: true,  // default true
+    negotiatesCBOR2: true      // default true: ask for cbor.2, fall back to cbor
 )
 ```
 
@@ -1129,7 +1149,18 @@ Integration environment variables:
 | `SURREALDB_PASSWORD` | _(unset)_ | If unset, sign-in is skipped. |
 | `SURREALDB_AUTH_LEVEL` | `root` | One of `root`, `namespace` / `ns`, `database` / `db`. |
 
-`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to test a particular `surreal` binary (this runs it locally even when Docker is available), or `SURREALDB_IMAGE_TAG` to choose the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build.
+`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to test a particular `surreal` binary (this runs it locally even when Docker is available), or `SURREALDB_IMAGE_TAG` to choose the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build. Tests that need `cbor.2` skip when the server doesn't negotiate it.
+
+### Conformance
+
+The CBOR codec is checked against the shared test vectors and scenarios in [surrealdb-protocol](https://github.com/surrealdb/surrealdb-protocol), pinned to release v0.14.0. Nothing from that repository is copied here: a script checks out the tag into `.build/surrealdb-protocol`.
+
+```sh
+./scripts/fetch-surrealdb-protocol.sh   # then `swift test` runs the CBOR vectors too
+./scripts/test-conformance.sh           # the scenarios; needs bun and a surreal binary (SURREAL_BIN)
+```
+
+`test-conformance.sh` builds `Conformance/Driver`, which answers the runner's JSON-lines protocol through this SDK's public API, and fails on any failure not listed in `Conformance/known-failures.txt`. CI runs both against SurrealDB 3.3.4 and the nightly build.
 
 ---
 

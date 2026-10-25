@@ -29,7 +29,7 @@ public actor SurrealClient: SurrealLiveQueryable {
         session: SessionContext = .init()
     ) throws {
         let rpcURL = try Endpoint.normalizedRPCURL(from: endpoint)
-        let codec = makeWireCodec(wireProtocol)
+        let codec = makeWireCodec(wireProtocol, offersCBOR2: options.negotiatesCBOR2)
         let status = ConnectionStatusBroadcaster()
 
         let transport: any RPCEngine
@@ -174,6 +174,11 @@ public actor SurrealClient: SurrealLiveQueryable {
     /// variables, on the server and locally.
     public func reset() async throws {
         try await core.reset(session: nil)
+    }
+
+    /// The CBOR dialect the connection uses (`cbor.2` once negotiated).
+    func cborDialect() async -> CBORDialect? {
+        await core.cborDialect()
     }
 
     /// The server's version, e.g. `"3.3.4"`.

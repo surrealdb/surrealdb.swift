@@ -191,6 +191,9 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
     case bool(Bool)
     case int(Int64)
     case double(Double)
+    /// A fixed-width number (`u8`, `f32`, ...) from SurrealDB 4.0. Only a
+    /// `cbor.2` connection keeps the width; see ``SurrealSizedNumber``.
+    case sized(SurrealSizedNumber)
     case string(String)
     case bytes(Data)
 
@@ -260,6 +263,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             try container.encode(value)
         case .double(let value):
             try container.encode(value)
+        case .sized(let value):
+            try value.widened.encode(to: encoder)
         case .string(let value):
             try container.encode(value)
         case .bytes(let value):
@@ -332,6 +337,11 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return value
         case .double(let value):
             return value
+        case .sized(let value):
+            if case .u64(let unsigned) = value {
+                return unsigned
+            }
+            return try value.widened.jsonObject()
         case .string(let value):
             return value
         case .bytes(let value):
@@ -383,6 +393,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             if value.isNaN { return "NaN" }
             if value.isInfinite { return value > 0 ? "math::inf" : "math::neg_inf" }
             return "\(value)f"
+        case .sized(let value):
+            return value.sqlLiteral
         case .string(let value):
             return SurrealQL.quote(value)
         case .bytes(let value):

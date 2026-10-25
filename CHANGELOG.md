@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI runs every integration test against a version matrix: SurrealDB 3.3.4 (pinned) and the nightly build. `scripts/test-integration.sh` takes the server binary from `SURREALDB_BIN`.
 - The README's installation snippet now points at the current release.
 - Over WebSocket, `set(_:value:)` and `unset(_:)` now define and remove the parameter on the server (`let`/`unset`), so SurrealQL the server evaluates on its own, such as functions and permission clauses, sees it. Variables are re-defined after a reconnect and copied into forked sessions. HTTP still sends them with each query.
+- The CBOR decoder refuses what SurrealDB 4.0 refuses, rather than guessing: tags 0, 9 and 13 (datetimes, UUIDs and durations as text; servers send tags 12, 37 and 14), unknown tags, integers outside `Int64` (they used to become a `Double`), map keys that aren't strings or that repeat, NONE with a payload, range bounds outside tags 50 and 51, record id keys other than an int, string, UUID, array, object or range, decimals beyond 96 bits or 28 places, datetimes outside the years -262143 to 262142, points without two coordinates, and polygons without a ring. Sets drop duplicates, as the server does.
+- Encoding refuses a `.duration` whose text doesn't parse and a `.decimal` that isn't a valid decimal, rather than sending them for the server to reject. Datetimes outside the server's range fail to encode.
+
 ### Added
 - `SurrealWebSocketOptions.reconnectMaxDelay` caps the backoff between reconnect attempts.
 - `version()` returns the server version, and `connect()` refuses servers outside 3.0.0 up to, but not including, 5.0.0 with `SurrealError.unsupportedServerVersion`. `SurrealClientOptions.checkServerVersion` turns the check off; the range is `ServerVersion.minimum`/`maximum`.
@@ -30,12 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `liveOf(_:as:)` attaches a stream to a live query that's already running, such as one started with a raw `LIVE SELECT`.
 - `SurrealDSL.liveDiff(_:where:)` builds a `LIVE SELECT DIFF`, whose events decode to `[SurrealPatchOperation]`. `SurrealPatchOperation` is now `Decodable` and gains `.change(path:value:)` for SurrealDB's text diffs.
 - Connection status: `SurrealClient.connectionStatus` and `connectionStatusUpdates()`, an `AsyncStream<SurrealConnectionStatus>` of `.connecting`, `.connected`, `.reconnecting(attempt:)` and `.disconnected`.
+- `cbor.2`, the CBOR dialect of SurrealDB 4.0. Over WebSocket the client offers the sub-protocols `cbor.2` and `cbor`; over HTTP it asks for `application/cbor; v=2` and sends it once a response arrives in it. Servers before 4.0 keep plain `cbor`. `SurrealClientOptions.negotiatesCBOR2` turns it off.
+- `SurrealValue.sized(SurrealSizedNumber)` for 4.0's sized numbers: `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `u64`, `f16` (`SurrealFloat16`) and `f32`, in CBOR tags 180 to 188 on `cbor.2`. They decode into Swift's integer and floating-point types. Over plain `cbor` and JSON the client widens them, as the server does.
+- Conformance with surrealdb-protocol v0.14.0: unit tests run its CBOR vectors (`cbor.yaml` as `cbor` and `cbor.2`, and `cbor2.yaml`), and CI runs its scenarios through `Conformance/Driver` against 3.3.4 and nightly. `scripts/fetch-surrealdb-protocol.sh` checks out the release; `scripts/test-conformance.sh` runs the scenarios.
 
 ### Security
 - Fixed SurrealQL injection in generated queries. Predicate values (`Person.Fields.name == x`) are now sent as bound variables instead of being spliced into the statement; table and field names are always backtick-escaped; record-id operations (`select(recordID:)`, `create(recordID:)` and the rest) send the id as a bound value; and `SurrealValue.sqlLiteral` now escapes backslashes, so a value ending in `\` can no longer close its own string. `SurrealPredicate` gains a `bindings` dictionary, and `SurrealPredicateValue` now requires `surrealPredicateValue: SurrealValue` in place of `surrealPredicateSQL` (source-breaking for custom conformances).
 - Added `SurrealQL.escapeIdent(_:)`, `SurrealQL.escapeFieldPath(_:)` and `SurrealQL.quote(_:)` for callers writing their own SurrealQL.
 
 ### Fixed
+- Geometries other than points decoded with empty coordinates: the server tags each point inside a line, each line inside a polygon, and so on. The client now reads and writes that form, and closes an open polygon ring as the server does.
+- A record id in tag 8 as SurrealQL text (`person:⟨a b⟩`, `person:[1, 'x']`, `person:u'…'`) kept its key as raw text. It's now parsed.
 - Over HTTP, a refused or failed connection threw a raw `URLError`. It now throws `SurrealError.connectionLost`, as WebSocket does.
 - Live notifications that arrived before `live(_:)` had opened its stream were dropped. The WebSocket engine now holds notifications for live queries with no stream yet (up to 64 queries and 256 notifications each) and delivers them when one opens.
 - An RPC error whose `cause` was NONE or a string failed to decode, and over WebSocket that closed the connection. Such errors now arrive as `SurrealError.serverError`.

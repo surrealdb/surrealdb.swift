@@ -47,8 +47,9 @@ func duration_componentsAtTheLimitsDoNotTrap() {
 }
 
 @Test
-func duration_decodesStringForm() throws {
-    #expect(try decode(.tagged(CBORSurrealCodec.tagStringDuration, .utf8String("2w"))) == .duration("2w"))
+func duration_stringFormIsRefused() {
+    // Tag 13 is the text form, which servers never send and 4.0 refuses.
+    #expect(throws: SurrealError.self) { try decode(.tagged(CBORSurrealCodec.tagStringDuration, .utf8String("2w"))) }
 }
 
 @Test
@@ -57,8 +58,10 @@ func duration_encodesAsSecondsNanos() {
     #expect(CBORSurrealCodec.toCBOR(.duration("1h30m")) == .tagged(tag, .array([.unsignedInt(5400)])))
     #expect(CBORSurrealCodec.toCBOR(.duration("1s500ms")) == .tagged(tag, .array([.unsignedInt(1), .unsignedInt(500_000_000)])))
     #expect(CBORSurrealCodec.toCBOR(.duration("0s")) == .tagged(tag, .array([])))
-    // Text that isn't a duration is passed through for the server to reject.
-    #expect(CBORSurrealCodec.toCBOR(.duration("soon")) == .tagged(CBORSurrealCodec.tagStringDuration, .utf8String("soon")))
+    // Text that isn't a duration has no tag 14 form, so it isn't sent.
+    #expect(throws: EncodingError.self) {
+        _ = try CBORSurrealCodec.encode(RPCRequest(id: "1", method: "query", params: [.duration("soon")], session: nil, txn: nil))
+    }
 }
 
 @Test

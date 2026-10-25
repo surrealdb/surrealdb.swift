@@ -5,7 +5,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private let urlSession: URLSession
     private let clientOptions: SurrealClientOptions
     private let wsOptions: SurrealWebSocketOptions
-    private let codec: any WireCodec
+    /// What the client offers. Each socket speaks `codec`, this narrowed to
+    /// the sub-protocol the server picked for it.
+    private let offeredCodec: any WireCodec
+    private var codec: any WireCodec
     private let status: ConnectionStatusBroadcaster?
 
     private var task: URLSessionWebSocketTask?
@@ -60,6 +63,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         self.endpoint = Endpoint.asWebSocket(endpoint)
         self.clientOptions = clientOptions
         self.wsOptions = wsOptions
+        self.offeredCodec = codec
         self.codec = codec
         self.urlSession = urlSession
     }
@@ -119,6 +123,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         pendingConnect = nil
         connectingSocket?.cancel(with: .goingAway, reason: nil)
         connectingSocket = nil
+    }
+
+    func cborDialect() -> CBORDialect? {
+        (codec as? CBORWireCodec)?.dialect
     }
 
     func close() async {
@@ -314,7 +322,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         let thisAttempt = attempt
         tearDownSocket(closeCode: .goingAway)
 
-        let socket = urlSession.webSocketTask(with: endpoint, protocols: codec.websocketSubprotocols)
+        let socket = urlSession.webSocketTask(with: endpoint, protocols: offeredCodec.websocketSubprotocols)
         socket.resume()
         connectingSocket = socket
         defer {
@@ -323,9 +331,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             }
         }
 
+        let negotiated: any WireCodec
         do {
-            try await withTimeout(seconds: clientOptions.requestTimeout) { [codec] in
-                try await Self.handshake(socket, codec: codec)
+            negotiated = try await withTimeout(seconds: clientOptions.requestTimeout) { [offeredCodec] in
+                try await Self.handshake(socket, offering: offeredCodec)
             }
         } catch {
             socket.cancel(with: .goingAway, reason: nil)
@@ -343,16 +352,22 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
 
         generation += 1
         task = socket
+        codec = negotiated
         connected = true
 
         startReceiveLoop(generation: generation)
         startPingLoop(generation: generation)
     }
 
-    private static func handshake(_ socket: URLSessionWebSocketTask, codec: any WireCodec) async throws {
+    /// Returns the codec for the sub-protocol the server picked.
+    private static func handshake(_ socket: URLSessionWebSocketTask, offering offered: any WireCodec) async throws -> any WireCodec {
         let id = UUID().uuidString.lowercased()
         let request = RPCRequest(id: id, method: "ping", params: nil, session: nil, txn: nil)
-        try await socket.send(.data(try codec.encode(request)))
+        // A ping has no values, so it's the same bytes in every dialect.
+        try await socket.send(.data(try offered.encode(request)))
+        // The send waited for the upgrade, so its response is in.
+        let subprotocol = (socket.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        let codec = offered.negotiated(subprotocol: subprotocol)
 
         // Nothing else is in flight on a new socket, so the next message is
         // the reply.
@@ -373,6 +388,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         guard envelope.id?.lowercased() == id else {
             throw SurrealError.invalidResponse("Unexpected reply to the connect ping.")
         }
+        return codec
     }
 
     private func tearDownSocket(closeCode: URLSessionWebSocketTask.CloseCode) {

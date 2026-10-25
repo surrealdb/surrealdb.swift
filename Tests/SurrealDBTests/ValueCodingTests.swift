@@ -188,20 +188,24 @@ func valueCoding_rejectsValuesThatWouldChangeOrTrap() {
 }
 
 @Test
-func valueCoding_datetimeSecondsNearInt64MinDoNotTrap() throws {
+func valueCoding_datetimeSecondsOutsideTheServerRangeThrow() throws {
+    // Int64.min used to decode (and once trapped); the server's datetimes
+    // stop at the years -262143 and 262142.
     let tag = CBOR.Tag(rawValue: 12)
-    let value = try CBORSurrealCodec.fromCBOR(.tagged(tag, .array([CBORSurrealCodec.cborInteger(.min), .unsignedInt(0)])))
-    guard case .datetime(let date) = value else {
-        Issue.record("Expected a datetime")
-        return
+    for seconds in [Int64.min, -8_334_601_228_801, 8_210_266_876_800, .max] {
+        #expect(throws: SurrealError.self) {
+            try CBORSurrealCodec.fromCBOR(.tagged(tag, .array([CBORSurrealCodec.cborInteger(seconds), .unsignedInt(0)])))
+        }
     }
-    #expect(date.timeIntervalSince1970 < -9e18)
+    for seconds in [Int64(-8_334_601_228_800), 8_210_266_876_799] {
+        #expect(try CBORSurrealCodec.fromCBOR(.tagged(tag, .array([CBORSurrealCodec.cborInteger(seconds), .unsignedInt(0)]))) != .null)
+    }
 }
 
 @Test
 func valueCoding_outOfRangeDatetimesFailToEncode() throws {
-    // Decoded from the server's extreme, then written back.
-    let extreme = try CBORSurrealCodec.fromCBOR(.tagged(CBOR.Tag(rawValue: 12), .array([CBORSurrealCodec.cborInteger(.min), .unsignedInt(0)])))
+    // One second past the latest datetime the server holds.
+    let extreme = SurrealValue.datetime(Date(timeIntervalSince1970: 8_210_266_876_800))
     for value in [extreme, .datetime(Date(timeIntervalSinceReferenceDate: 1e300)), .array([.object(["at": .datetime(.init(timeIntervalSinceReferenceDate: -1e19))])]),
                   .range(SurrealRange(begin: .included(.datetime(.init(timeIntervalSinceReferenceDate: 1e300))), end: .unbounded))] {
         #expect(throws: EncodingError.self) {

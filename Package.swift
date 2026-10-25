@@ -48,8 +48,24 @@ let package = Package(
             dependencies: [
                 "SurrealDB",
                 "SurrealDBMacroPlugin",
+                "SurrealConformance",
+                .product(name: "PotentCodables", package: "PotentCodables"),
                 .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax")
             ]
+        ),
+        // Shared by the vector tests and the conformance driver: typed JSON,
+        // the value notation of surrealdb-protocol's vectors and scenarios.
+        .target(
+            name: "SurrealConformance",
+            dependencies: ["SurrealDB"],
+            path: "Conformance/TypedJSON"
+        ),
+        // The driver surrealdb-protocol's conformance runner talks to. Not a
+        // product: build it with `swift build --product SurrealConformanceDriver`.
+        .executableTarget(
+            name: "SurrealConformanceDriver",
+            dependencies: ["SurrealDB", "SurrealConformance"],
+            path: "Conformance/Driver"
         ),
         .target(
             name: "AgentMemory"

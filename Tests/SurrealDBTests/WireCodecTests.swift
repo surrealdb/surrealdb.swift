@@ -103,7 +103,12 @@ func jsonWireCodec_decodesErrorEnvelope() throws {
 func cborWireCodec_exposesSubprotocolAndContentType() {
     let codec = CBORWireCodec()
     #expect(codec.httpContentType == "application/cbor")
-    #expect(codec.websocketSubprotocols == ["cbor"])
+    #expect(codec.httpAccept == "application/cbor; v=2")
+    #expect(codec.websocketSubprotocols == ["cbor.2", "cbor"])
+
+    let plain = CBORWireCodec(offersCBOR2: false)
+    #expect(plain.httpAccept == "application/cbor")
+    #expect(plain.websocketSubprotocols == ["cbor"])
 }
 
 @Test

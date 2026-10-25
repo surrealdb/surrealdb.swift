@@ -7,15 +7,27 @@ public struct SurrealClientOptions: Sendable {
     /// ``ServerVersion/minimum`` and ``ServerVersion/maximum`` and refuses
     /// unsupported servers.
     public var checkServerVersion: Bool
+    /// Whether to ask the server for `cbor.2`, the CBOR dialect SurrealDB 4.0
+    /// adds for its sized numbers. A server that doesn't speak it (anything
+    /// before 4.0) answers in plain `cbor`, so this is safe to leave on.
+    ///
+    /// On `cbor.2`, a `u8` or `f32` column comes back as
+    /// ``SurrealValue/sized(_:)``. Turn this off to keep plain `cbor`, where
+    /// the server widens them to `.int`, `.double` or (a `u64` above
+    /// `Int64.max`) `.decimal`. Typed decoding (`Decodable`) reads either.
+    /// Only applies to ``SurrealWireProtocol/cbor``.
+    public var negotiatesCBOR2: Bool
 
     public init(
         requestTimeout: TimeInterval = 20,
         pingInterval: TimeInterval = 30,
-        checkServerVersion: Bool = true
+        checkServerVersion: Bool = true,
+        negotiatesCBOR2: Bool = true
     ) {
         self.requestTimeout = requestTimeout
         self.pingInterval = pingInterval
         self.checkServerVersion = checkServerVersion
+        self.negotiatesCBOR2 = negotiatesCBOR2
     }
 }
 

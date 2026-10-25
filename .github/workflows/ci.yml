@@ -6,16 +6,68 @@ on:
         branches:
             - "**"
 
+env:
+    # The surrealdb-protocol release whose vectors and conformance scenarios
+    # the tests run. Bump with ConformanceVectors.pinnedVersion and
+    # scripts/fetch-surrealdb-protocol.sh.
+    SURREALDB_PROTOCOL_TAG: v0.14.0
+
 jobs:
     unit-tests:
         name: Unit Tests
         runs-on: macos-15
         steps:
             - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+            - name: Check out surrealdb-protocol ${{ env.SURREALDB_PROTOCOL_TAG }}
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+              with:
+                  repository: surrealdb/surrealdb-protocol
+                  ref: ${{ env.SURREALDB_PROTOCOL_TAG }}
+                  path: surrealdb-protocol
             - name: Select Xcode
               run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
             - name: Unit tests
+              env:
+                  # Set, so the CBOR vector tests fail rather than skip if the
+                  # checkout is missing.
+                  SURREALDB_PROTOCOL_DIR: ${{ github.workspace }}/surrealdb-protocol
               run: ./scripts/test-unit.sh
+
+    conformance:
+        name: Conformance (SurrealDB ${{ matrix.surrealdb }})
+        runs-on: macos-15
+        needs: unit-tests
+        strategy:
+            fail-fast: false
+            matrix:
+                surrealdb:
+                    - v3.3.4
+                    - nightly
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+            - name: Check out surrealdb-protocol ${{ env.SURREALDB_PROTOCOL_TAG }}
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+              with:
+                  repository: surrealdb/surrealdb-protocol
+                  ref: ${{ env.SURREALDB_PROTOCOL_TAG }}
+                  path: surrealdb-protocol
+            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+            - name: Select Xcode
+              run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+            - name: Install SurrealDB ${{ matrix.surrealdb }}
+              env:
+                  SURREALDB_VERSION: ${{ matrix.surrealdb }}
+              run: |
+                  mkdir -p "$RUNNER_TEMP/surrealdb"
+                  url="https://download.surrealdb.com/${SURREALDB_VERSION}/surreal-${SURREALDB_VERSION}.darwin-arm64.tgz"
+                  curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP/surrealdb"
+                  "$RUNNER_TEMP/surrealdb/surreal" version
+                  echo "SURREAL_BIN=$RUNNER_TEMP/surrealdb/surreal" >> "$GITHUB_ENV"
+            - name: Conformance scenarios
+              env:
+                  SURREALDB_PROTOCOL_DIR: ${{ github.workspace }}/surrealdb-protocol
+                  CONFORMANCE_REPORT: ${{ runner.temp }}/conformance.json
+              run: ./scripts/test-conformance.sh
 
     integration-tests:
         name: Integration Tests (SurrealDB ${{ matrix.surrealdb }})

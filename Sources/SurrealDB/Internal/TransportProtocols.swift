@@ -4,6 +4,13 @@ protocol RPCEngine: Actor {
     func connect() async throws
     func close() async
     func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope
+    /// The CBOR dialect in use: over WebSocket the one the handshake picked,
+    /// over HTTP the one the last response came in. `nil` for JSON.
+    func cborDialect() async -> CBORDialect?
+}
+
+extension RPCEngine {
+    func cborDialect() async -> CBORDialect? { nil }
 }
 
 protocol LiveRPCEngine: RPCEngine {

@@ -378,6 +378,10 @@ actor SurrealClientCore {
     // MARK: - Server information and auth lifecycle
 
     /// The server's version, without the `surrealdb-` prefix.
+    func cborDialect() async -> CBORDialect? {
+        await engine.cborDialect()
+    }
+
     func version() async throws -> String {
         // Sent without the stored token: over HTTP a stale one would get the
         // request refused before connect() lets the caller re-authenticate.

@@ -1,0 +1,16 @@
+# Conformance scenarios this SDK fails today, as "<transport> <scenario>".
+# scripts/test-conformance.sh fails on any failure not listed here, and on a
+# listed one that passes.
+
+# An /import refused with an HTTP error (403 when the route is denied, 400
+# without OPTION IMPORT) surfaces as SurrealError.httpError, without the
+# server's error kind.
+ws deny-http-route-import
+http deny-http-route-import
+ws import-needs-option-import
+http import-needs-option-import
+
+# SurrealValue.datetime holds a Date, which can't keep nanoseconds:
+# 1969-12-31T23:59:59.999999999Z reads back as 1970-01-01T00:00:00Z.
+ws query-values-survive-the-full-stack
+http query-values-survive-the-full-stack
