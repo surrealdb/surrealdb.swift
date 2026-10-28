@@ -35,7 +35,8 @@ public struct SurrealWebSocketOptions: Sendable {
     /// Whether to reconnect after the connection drops unexpectedly.
     public var reconnectEnabled: Bool
     /// How many reconnect attempts to make after a drop before giving up.
-    /// The count starts again after each successful reconnect.
+    /// The count starts again after each successful reconnect. A negative
+    /// value (`-1`) retries without limit; `0` never reconnects.
     public var maxReconnectAttempts: Int
     /// The delay before the first attempt; each later attempt doubles it.
     public var reconnectBaseDelay: TimeInterval

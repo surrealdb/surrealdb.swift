@@ -516,7 +516,7 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         liveBuffer.removeAll()
         liveBufferOrder.removeAll()
 
-        guard !closedByClient, wsOptions.reconnectEnabled, wsOptions.maxReconnectAttempts > 0 else {
+        guard !closedByClient, wsOptions.reconnectEnabled, wsOptions.maxReconnectAttempts != 0 else {
             finishAllLiveStreams()
             status?.send(.disconnected)
             return
@@ -530,7 +530,9 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     private func reconnectLoop() async {
-        for attempt in 1...wsOptions.maxReconnectAttempts {
+        // A negative `maxReconnectAttempts` (-1, as in the JS SDK) never gives up.
+        let limit = wsOptions.maxReconnectAttempts < 0 ? Int.max : wsOptions.maxReconnectAttempts
+        for attempt in 1...limit {
             let delay = Self.backoffDelay(attempt: attempt, options: wsOptions)
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
 
