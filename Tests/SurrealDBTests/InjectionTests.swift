@@ -172,3 +172,14 @@ func injection_fieldPathsKeepArrayParts() {
     #expect(SurrealQL.escapeFieldPath("odd[x]") == "`odd[x]`")
     #expect(SurrealValue.double(.nan).sqlLiteral == "NaN")
 }
+
+@Test
+func injection_transactionRenameLeavesStringLiteralsAlone() {
+    let tx = SurrealTransaction()
+    tx.append("CREATE a SET n = $x", bindings: ["x": .int(1)])
+    tx.append("CREATE b SET n = $x, note = 'costs $x'", bindings: ["x": .int(2)])
+    let (sql, bindings) = tx.build()
+    #expect(sql.contains("note = 'costs $x'"))
+    #expect(bindings.count == 2)
+    #expect(!sql.contains("$x_tx1'"))
+}

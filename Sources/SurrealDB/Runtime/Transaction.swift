@@ -71,37 +71,8 @@ public final class SurrealTransaction: @unchecked Sendable {
     }
 
     private func renameBinding(in sql: String, from oldKey: String, to newKey: String) -> String {
-        // Replace `$oldKey` occurrences that aren't part of a longer identifier.
-        var result = ""
-        let chars = Array(sql)
-        let oldPattern = Array("$\(oldKey)")
-        var i = 0
-
-        while i < chars.count {
-            if matches(chars: chars, at: i, pattern: oldPattern),
-               isBindingBoundary(chars: chars, after: i + oldPattern.count)
-            {
-                result += "$" + newKey
-                i += oldPattern.count
-            } else {
-                result.append(chars[i])
-                i += 1
-            }
-        }
-        return result
-    }
-
-    private func matches(chars: [Character], at index: Int, pattern: [Character]) -> Bool {
-        guard index + pattern.count <= chars.count else { return false }
-        for offset in 0..<pattern.count where chars[index + offset] != pattern[offset] {
-            return false
-        }
-        return true
-    }
-
-    private func isBindingBoundary(chars: [Character], after index: Int) -> Bool {
-        guard index < chars.count else { return true }
-        let next = chars[index]
-        return !(next.isLetter || next.isNumber || next == "_")
+        // Leaves `$oldKey` inside strings, quoted identifiers and comments
+        // alone, which a plain text replace would rewrite.
+        SurrealQL.renameParameter(oldKey, to: newKey, in: sql)
     }
 }
