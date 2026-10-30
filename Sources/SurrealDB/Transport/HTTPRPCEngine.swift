@@ -4,7 +4,9 @@ actor HTTPRPCEngine: RPCEngine {
     private let endpoint: URL
     private let urlSession: URLSession
     private let options: SurrealClientOptions
-    private let codec: any WireCodec
+    /// Sends in plain `cbor` until a response arrives as `cbor.2`, then in
+    /// `cbor.2` (see `CBORWireCodec`).
+    private var codec: any WireCodec
     private var isConnected = false
 
     init(
@@ -23,6 +25,10 @@ actor HTTPRPCEngine: RPCEngine {
         isConnected = true
     }
 
+    func cborDialect() -> CBORDialect? {
+        (codec as? CBORWireCodec)?.dialect
+    }
+
     func close() async {
         isConnected = false
     }
@@ -34,8 +40,9 @@ actor HTTPRPCEngine: RPCEngine {
 
         var urlRequest = URLRequest(url: endpoint, timeoutInterval: options.requestTimeout)
         urlRequest.httpMethod = "POST"
+        let codec = self.codec
         urlRequest.setValue(codec.httpContentType, forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue(codec.httpContentType, forHTTPHeaderField: "Accept")
+        urlRequest.setValue(codec.httpAccept, forHTTPHeaderField: "Accept")
 
         if let namespace = session.namespace {
             urlRequest.setValue(namespace, forHTTPHeaderField: "Surreal-NS")
@@ -49,7 +56,17 @@ actor HTTPRPCEngine: RPCEngine {
 
         urlRequest.httpBody = try codec.encode(request)
 
-        let (data, response) = try await urlSession.data(for: urlRequest)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: urlRequest)
+        } catch let error as URLError where error.code == .timedOut {
+            throw SurrealError.timeout
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch let error as URLError {
+            throw SurrealError.connectionLost(cause: error)
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw SurrealError.invalidResponse("Expected HTTPURLResponse.")
@@ -60,6 +77,8 @@ actor HTTPRPCEngine: RPCEngine {
             throw SurrealError.httpError(statusCode: httpResponse.statusCode, body: body)
         }
 
-        return try codec.decodeEnvelope(data)
+        let answered = codec.negotiated(httpContentType: httpResponse.value(forHTTPHeaderField: "Content-Type"))
+        self.codec = answered
+        return try answered.decodeEnvelope(data)
     }
 }

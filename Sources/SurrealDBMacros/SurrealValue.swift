@@ -9,8 +9,122 @@ public struct SurrealRecordID: Sendable, Hashable, Codable {
         self.id = id
     }
 
+    /// The record id as SurrealQL text, escaped the way the server renders
+    /// it (`person:alice`, ``person:`123` ``, `person:u'…'`). For display;
+    /// the SDK itself sends record ids as bound values.
     public var rawValue: String {
-        "\(table):\(id.sqlLiteral)"
+        "\(SurrealQL.displayIdent(table)):\(idText)"
+    }
+
+    /// Parses the text form the server sends record ids in over JSON
+    /// (`person:alice`, ``person:`123` ``, `person:⟨a b⟩`, `person:42`).
+    /// Integer keys become `.int`, `u'…'` keys `.uuid`, and identifier keys
+    /// `.string`. `nil` without a `table:`, and for array, object and
+    /// record-id keys, which this doesn't parse.
+    public init?(parsing text: String) {
+        guard let (table, rest) = Self.splitTable(text), !rest.isEmpty else { return nil }
+        // Array and object keys, and keys that are themselves record ids
+        // (`outer:person:alice`), aren't parsed: a guess would name a
+        // different record.
+        if rest.first == "[" || rest.first == "{" || (Self.unwrap(rest) == nil && rest.contains(":")) {
+            return nil
+        }
+        self.table = table
+        if let int = Int64(rest), rest.first != "+" {
+            self.id = .int(int)
+        } else if let uuid = Self.uuidKey(rest) {
+            self.id = .uuid(uuid)
+        } else if let unwrapped = Self.unwrap(rest) {
+            self.id = .string(unwrapped)
+        } else {
+            self.id = .string(rest)
+        }
+    }
+
+    private static func splitTable(_ text: String) -> (String, String)? {
+        if text.first == "`" || text.first == "⟨" {
+            let close: Character = text.first == "`" ? "`" : "⟩"
+            var escaped = false
+            var name = ""
+            for (offset, char) in text.dropFirst().enumerated() {
+                if escaped {
+                    name.append(char)
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == close {
+                    let rest = text.dropFirst(offset + 2)
+                    guard rest.first == ":" else { return nil }
+                    return (name, String(rest.dropFirst()))
+                } else {
+                    name.append(char)
+                }
+            }
+            return nil
+        }
+        guard let colon = text.firstIndex(of: ":") else { return nil }
+        return (String(text[..<colon]), String(text[text.index(after: colon)...]))
+    }
+
+    /// The UUID in a `u'…'` or `u"…"` key.
+    private static func uuidKey(_ key: String) -> UUID? {
+        guard key.count >= 4, key.hasPrefix("u'") && key.hasSuffix("'") || key.hasPrefix("u\"") && key.hasSuffix("\"") else {
+            return nil
+        }
+        return UUID(uuidString: String(key.dropFirst(2).dropLast()))
+    }
+
+    /// A range key as SurrealQL writes it after `table:`, such as `1..=4`
+    /// or `` `a`>.. ``. String bounds are identifiers here, not strings.
+    static func rangeKeyText(_ range: SurrealRange) -> String {
+        func key(_ value: SurrealValue) -> String {
+            if case .string(let text) = value { return SurrealQL.escapeIdent(text) }
+            return value.sqlLiteral
+        }
+        var text = ""
+        switch range.begin {
+        case .included(let value): text += key(value)
+        case .excluded(let value): text += key(value) + ">"
+        case .unbounded: break
+        }
+        text += ".."
+        switch range.end {
+        case .included(let value): text += "=" + key(value)
+        case .excluded(let value): text += key(value)
+        case .unbounded: break
+        }
+        return text
+    }
+
+    /// The contents of a `` `...` `` or `⟨...⟩` key, unescaped.
+    private static func unwrap(_ key: String) -> String? {
+        guard let open = key.first, let last = key.last, key.count >= 2,
+              (open == "`" && last == "`") || (open == "⟨" && last == "⟩")
+        else { return nil }
+        var result = ""
+        var escaped = false
+        for char in key.dropFirst().dropLast() {
+            if escaped {
+                result.append(char)
+                escaped = false
+            } else if char == "\\" {
+                escaped = true
+            } else {
+                result.append(char)
+            }
+        }
+        return result
+    }
+
+    private var idText: String {
+        switch id {
+        case .string(let value):
+            return SurrealQL.displayIdent(value)
+        case .range(let range):
+            return Self.rangeKeyText(range)
+        default:
+            return id.sqlLiteral
+        }
     }
 }
 
@@ -30,6 +144,37 @@ public struct SurrealRange: Sendable, Hashable, Codable {
     }
 }
 
+/// A reference to a file in a bucket (`f"bucket:/key"`). The bucket is
+/// defined with `DEFINE BUCKET`; files are an experimental server feature.
+public struct SurrealFileRef: Sendable, Hashable, Codable {
+    public let bucket: String
+    public let key: String
+
+    /// `key` is the file's path in the bucket. It always starts with `/`,
+    /// which is added when missing, as the server does.
+    public init(bucket: String, key: String) {
+        self.bucket = bucket
+        self.key = key.hasPrefix("/") ? key : "/" + key
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case bucket, key
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            bucket: try container.decode(String.self, forKey: .bucket),
+            key: try container.decode(String.self, forKey: .key)
+        )
+    }
+
+    /// `bucket:/key`, as inside the `f"..."` literal.
+    public var rawValue: String {
+        "\(bucket):\(key)"
+    }
+}
+
 public enum SurrealGeometry: Sendable, Hashable, Codable {
     case point([Double])
     case line([[Double]])
@@ -46,6 +191,9 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
     case bool(Bool)
     case int(Int64)
     case double(Double)
+    /// A fixed-width number (`u8`, `f32`, ...) from SurrealDB 4.0. Only a
+    /// `cbor.2` connection keeps the width; see ``SurrealSizedNumber``.
+    case sized(SurrealSizedNumber)
     case string(String)
     case bytes(Data)
 
@@ -59,6 +207,7 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
     case range(SurrealRange)
     case set([SurrealValue])
     case geometry(SurrealGeometry)
+    case file(SurrealFileRef)
 
     case array([SurrealValue])
     case object([String: SurrealValue])
@@ -114,12 +263,14 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             try container.encode(value)
         case .double(let value):
             try container.encode(value)
+        case .sized(let value):
+            try value.widened.encode(to: encoder)
         case .string(let value):
             try container.encode(value)
         case .bytes(let value):
             try container.encode(value.base64EncodedString())
         case .datetime(let value):
-            try container.encode(ISO8601DateFormatter().string(from: value))
+            try container.encode(SurrealValue.iso8601Fractional(value))
         case .uuid(let value):
             try container.encode(value.uuidString)
         case .decimal(let value):
@@ -136,23 +287,13 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             try container.encode(value)
         case .geometry(let value):
             try container.encode(String(describing: value))
+        case .file(let value):
+            try container.encode(value.rawValue)
         case .array(let value):
             try container.encode(value)
         case .object(let value):
             try container.encode(value)
         }
-    }
-
-    public static func fromEncodable<T: Encodable>(_ value: T, encoder: JSONEncoder = .surrealDefault) throws -> SurrealValue {
-        let data = try encoder.encode(value)
-        let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-        return try SurrealValue(jsonObject: object)
-    }
-
-    public func decode<T: Decodable>(_ type: T.Type, decoder: JSONDecoder = .surrealDefault) throws -> T {
-        let object = try jsonObject()
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed])
-        return try decoder.decode(T.self, from: data)
     }
 
     public init(jsonObject: Any) throws {
@@ -196,12 +337,17 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return value
         case .double(let value):
             return value
+        case .sized(let value):
+            if case .u64(let unsigned) = value {
+                return unsigned
+            }
+            return try value.widened.jsonObject()
         case .string(let value):
             return value
         case .bytes(let value):
             return value.base64EncodedString()
         case .datetime(let value):
-            return ISO8601DateFormatter().string(from: value)
+            return SurrealValue.iso8601Fractional(value)
         case .uuid(let value):
             return value.uuidString
         case .decimal(let value):
@@ -221,6 +367,8 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return try value.map { try $0.jsonObject() }
         case .geometry(let value):
             return ["geometry": String(describing: value)]
+        case .file(let value):
+            return value.rawValue
         case .array(let value):
             return try value.map { try $0.jsonObject() }
         case .object(let value):
@@ -228,6 +376,9 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         }
     }
 
+    /// The value as a SurrealQL literal. Strings are quoted and escaped, and
+    /// identifiers are backtick-escaped, so the result is always a single
+    /// value. Prefer bound variables over splicing this into a query.
     public var sqlLiteral: String {
         switch self {
         case .none:
@@ -239,21 +390,25 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
         case .int(let value):
             return "\(value)"
         case .double(let value):
-            return "\(value)"
+            if value.isNaN { return "NaN" }
+            if value.isInfinite { return value > 0 ? "math::inf" : "math::neg_inf" }
+            return "\(value)f"
+        case .sized(let value):
+            return value.sqlLiteral
         case .string(let value):
-            return "\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
+            return SurrealQL.quote(value)
         case .bytes(let value):
-            return "<bytes>\"\(value.base64EncodedString())\""
+            return "encoding::base64::decode(\(SurrealQL.quote(value.base64EncodedString())))"
         case .datetime(let value):
-            return "d\"\(ISO8601DateFormatter().string(from: value))\""
+            return "d\(SurrealQL.quote(SurrealValue.iso8601Fractional(value)))"
         case .uuid(let value):
-            return "u\"\(value.uuidString.lowercased())\""
+            return "u\(SurrealQL.quote(value.uuidString.lowercased()))"
         case .decimal(let value):
-            return "\(value)dec"
+            return SurrealValue.isDecimalText(value) ? "\(value)dec" : "<decimal>\(SurrealQL.quote(value))"
         case .duration(let value):
-            return value
+            return SurrealValue.isDurationText(value) ? value : "<duration>\(SurrealQL.quote(value))"
         case .table(let value):
-            return value
+            return "type::table(\(SurrealQL.quote(value)))"
         case .recordID(let value):
             return value.rawValue
         case .range:
@@ -262,14 +417,33 @@ public indirect enum SurrealValue: Sendable, Hashable, Codable {
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .geometry:
             return "<geometry>"
+        case .file(let value):
+            // File literals take no escapes, so build it from strings.
+            return "type::file(\(SurrealQL.quote(value.bucket)), \(SurrealQL.quote(value.key)))"
         case .array(let value):
             return "[" + value.map(\.sqlLiteral).joined(separator: ", ") + "]"
         case .object(let value):
             let entries = value.map { key, value in
-                "\(key): \(value.sqlLiteral)"
+                "\(SurrealQL.quote(key)): \(value.sqlLiteral)"
             }.sorted()
             return "{" + entries.joined(separator: ", ") + "}"
         }
+    }
+
+    package static func iso8601Fractional(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    /// `-?digits[.digits][e[+-]digits]`.
+    package static func isDecimalText(_ text: String) -> Bool {
+        text.range(of: #"^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$"#, options: .regularExpression) != nil
+    }
+
+    /// One or more `<digits><unit>` parts, e.g. `1h30m`.
+    static func isDurationText(_ text: String) -> Bool {
+        text.range(of: #"^([0-9]+(ns|us|µs|ms|s|m|h|d|w|y))+$"#, options: .regularExpression) != nil
     }
 }
 

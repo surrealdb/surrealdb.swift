@@ -25,11 +25,18 @@ public func bind<T: Encodable & Sendable>(_ name: String, as: T.Type = T.self) -
     return SurrealBinding<T>(name)
 }
 
+/// A `WHERE` condition. Values compared against fields are carried in
+/// `bindings` and sent as bound variables, never interpolated into `raw`.
 public struct SurrealPredicate: Sendable, Hashable, ExpressibleByStringLiteral, CustomStringConvertible {
     public let raw: String
+    public let bindings: [String: SurrealValue]
 
-    public init(raw: String) {
+    /// A predicate from raw SurrealQL. `raw` is sent as written, so never
+    /// build it from untrusted input; reference values as `$name` and pass
+    /// them in `bindings` instead.
+    public init(raw: String, bindings: [String: SurrealValue] = [:]) {
         self.raw = raw
+        self.bindings = bindings
     }
 
     public init(stringLiteral value: String) {
@@ -37,62 +44,122 @@ public struct SurrealPredicate: Sendable, Hashable, ExpressibleByStringLiteral, 
     }
 
     public var description: String { raw }
+
+    /// This predicate's `raw` text and bindings, merged into `bindings`. A
+    /// name this predicate binds to a different value than `bindings` does
+    /// is renamed here (in its bindings and `raw`), so both sides keep the
+    /// values they were built with.
+    public func merged(into bindings: [String: SurrealValue]) -> (raw: String, bindings: [String: SurrealValue]) {
+        var merged = bindings
+        var text = raw
+        for (name, value) in self.bindings.sorted(by: { $0.key < $1.key }) {
+            guard let existing = merged[name], existing != value else {
+                merged[name] = value
+                continue
+            }
+            // The counter can't know about names written by hand, so skip
+            // any already bound or mentioned here.
+            var renamed = PredicateBindingNames.next()
+            while merged[renamed] != nil || self.bindings[renamed] != nil || text.contains("$" + renamed) {
+                renamed = PredicateBindingNames.next()
+            }
+            text = SurrealQL.renameParameter(name, to: renamed, in: text)
+            merged[renamed] = value
+        }
+        return (text, merged)
+    }
+}
+
+/// Combines two predicates' bindings. If both bind the same name to
+/// different values, the right-hand one is renamed (in its bindings and its
+/// `raw` text), so each side keeps the value it was built with.
+private func combine(
+    _ lhs: SurrealPredicate,
+    _ rhs: SurrealPredicate,
+    _ join: (String, String) -> String
+) -> SurrealPredicate {
+    let (rhsRaw, bindings) = rhs.merged(into: lhs.bindings)
+    return .init(raw: join(lhs.raw, rhsRaw), bindings: bindings)
 }
 
 public func && (lhs: SurrealPredicate, rhs: @autoclosure () -> SurrealPredicate) -> SurrealPredicate {
-    .init(raw: "(\(lhs.raw) AND \(rhs().raw))")
+    combine(lhs, rhs()) { "(\($0) AND \($1))" }
 }
 
 public func || (lhs: SurrealPredicate, rhs: @autoclosure () -> SurrealPredicate) -> SurrealPredicate {
-    .init(raw: "(\(lhs.raw) OR \(rhs().raw))")
+    combine(lhs, rhs()) { "(\($0) OR \($1))" }
 }
 
 prefix public func ! (predicate: SurrealPredicate) -> SurrealPredicate {
-    .init(raw: "NOT (\(predicate.raw))")
+    .init(raw: "NOT (\(predicate.raw))", bindings: predicate.bindings)
 }
 
+/// A Swift value that can be compared against a field in a predicate. It's
+/// sent to the server as a bound variable.
 public protocol SurrealPredicateValue {
-    var surrealPredicateSQL: String { get }
-}
-
-extension SurrealBinding: SurrealPredicateValue {
-    public var surrealPredicateSQL: String { "$\(name)" }
+    var surrealPredicateValue: SurrealValue { get }
 }
 
 extension String: SurrealPredicateValue {
-    public var surrealPredicateSQL: String {
-        "\"\(self.replacingOccurrences(of: "\"", with: "\\\""))\""
-    }
+    public var surrealPredicateValue: SurrealValue { .string(self) }
 }
 
 extension Int: SurrealPredicateValue {
-    public var surrealPredicateSQL: String { "\(self)" }
+    public var surrealPredicateValue: SurrealValue { .int(Int64(self)) }
 }
 
 extension Int64: SurrealPredicateValue {
-    public var surrealPredicateSQL: String { "\(self)" }
+    public var surrealPredicateValue: SurrealValue { .int(self) }
 }
 
 extension Double: SurrealPredicateValue {
-    public var surrealPredicateSQL: String { "\(self)" }
+    public var surrealPredicateValue: SurrealValue { .double(self) }
 }
 
 extension Bool: SurrealPredicateValue {
-    public var surrealPredicateSQL: String { self ? "true" : "false" }
+    public var surrealPredicateValue: SurrealValue { .bool(self) }
 }
 
 extension UUID: SurrealPredicateValue {
-    public var surrealPredicateSQL: String { "u\"\(uuidString.lowercased())\"" }
+    public var surrealPredicateValue: SurrealValue { .uuid(self) }
 }
 
 extension Date: SurrealPredicateValue {
-    public var surrealPredicateSQL: String {
-        "d\"\(ISO8601DateFormatter().string(from: self))\""
-    }
+    public var surrealPredicateValue: SurrealValue { .datetime(self) }
+}
+
+extension SurrealRecordID: SurrealPredicateValue {
+    public var surrealPredicateValue: SurrealValue { .recordID(self) }
 }
 
 extension SurrealValue: SurrealPredicateValue {
-    public var surrealPredicateSQL: String { sqlLiteral }
+    public var surrealPredicateValue: SurrealValue { self }
+}
+
+extension Optional: SurrealPredicateValue where Wrapped: SurrealPredicateValue {
+    public var surrealPredicateValue: SurrealValue {
+        switch self {
+        case .some(let value): value.surrealPredicateValue
+        case .none: .none
+        }
+    }
+}
+
+/// Whether `value` can't be bound portably: NONE and bytes anywhere, and
+/// typed values (datetimes, UUIDs, ...) nested in a container.
+private func needsInlining(_ value: SurrealValue, nested: Bool = false) -> Bool {
+    switch value {
+    case .none, .bytes:
+        return true
+    case .datetime, .uuid, .decimal, .duration, .recordID, .table:
+        return nested
+    case .array(let values), .set(let values):
+        return values.contains { needsInlining($0, nested: true) }
+    case .object(let fields):
+        return fields.values.contains { needsInlining($0, nested: true) }
+    default:
+        return false
+    }
 }
 
 private func binaryPredicate<Model, Value: SurrealPredicateValue>(
@@ -100,7 +167,18 @@ private func binaryPredicate<Model, Value: SurrealPredicateValue>(
     _ op: String,
     _ rhs: Value
 ) -> SurrealPredicate {
-    .init(raw: "\(lhs.name) \(op) \(rhs.surrealPredicateSQL)")
+    let value = rhs.surrealPredicateValue
+    // JSON can't carry these as bound values (NONE arrives as NULL, bytes as
+    // base64 text that no cast decodes), nor typed values inside arrays and
+    // objects, which arrive as plain strings. Write them inline instead.
+    if needsInlining(value) {
+        return .init(raw: "\(SurrealQL.escapeFieldPath(lhs.name)) \(op) \(value.sqlLiteral)")
+    }
+    let name = PredicateBindingNames.next()
+    return .init(
+        raw: "\(SurrealQL.escapeFieldPath(lhs.name)) \(op) \(SurrealQL.typedParameter(name, for: value))",
+        bindings: [name: value]
+    )
 }
 
 private func binaryPredicate<Model, Value: Encodable & Sendable>(
@@ -108,7 +186,7 @@ private func binaryPredicate<Model, Value: Encodable & Sendable>(
     _ op: String,
     _ rhs: SurrealBinding<Value>
 ) -> SurrealPredicate {
-    .init(raw: "\(lhs.name) \(op) \(rhs.surrealPredicateSQL)")
+    .init(raw: "\(SurrealQL.escapeFieldPath(lhs.name)) \(op) $\(rhs.name)")
 }
 
 public func == <Model, Value: SurrealPredicateValue>(lhs: SurrealField<Model, Value>, rhs: Value) -> SurrealPredicate {
@@ -187,9 +265,10 @@ public enum SurrealDSL {
         start: Int? = nil,
         bindings: [String: SurrealValue] = [:]
     ) -> SurrealQuery<Model> {
-        var sql = "SELECT * FROM \(model.surrealTable)"
-        if let predicate {
-            sql += " WHERE \(predicate.raw)"
+        var sql = "SELECT * FROM \(SurrealQL.escapeIdent(model.surrealTable))"
+        let (whereRaw, allBindings) = resolve(bindings, predicate)
+        if let whereRaw {
+            sql += " WHERE \(whereRaw)"
         }
         if let limit {
             sql += " LIMIT \(limit)"
@@ -197,7 +276,7 @@ public enum SurrealDSL {
         if let start {
             sql += " START \(start)"
         }
-        return .init(sql: sql + ";", bindings: bindings)
+        return .init(sql: sql + ";", bindings: allBindings)
     }
 
     public static func create<Model: SurrealModel & Codable & Sendable>(
@@ -205,7 +284,10 @@ public enum SurrealDSL {
         contentBinding: String = "content",
         bindings: [String: SurrealValue] = [:]
     ) -> SurrealQuery<Model> {
-        .init(sql: "CREATE \(model.surrealTable) CONTENT $\(contentBinding);", bindings: bindings)
+        .init(
+            sql: "CREATE \(SurrealQL.escapeIdent(model.surrealTable)) CONTENT $\(contentBinding);",
+            bindings: bindings
+        )
     }
 
     public static func update<Model: SurrealModel & Decodable & Sendable>(
@@ -214,11 +296,12 @@ public enum SurrealDSL {
         contentBinding: String = "content",
         bindings: [String: SurrealValue] = [:]
     ) -> SurrealQuery<Model> {
-        var sql = "UPDATE \(model.surrealTable) CONTENT $\(contentBinding)"
-        if let predicate {
-            sql += " WHERE \(predicate.raw)"
+        var sql = "UPDATE \(SurrealQL.escapeIdent(model.surrealTable)) CONTENT $\(contentBinding)"
+        let (whereRaw, allBindings) = resolve(bindings, predicate)
+        if let whereRaw {
+            sql += " WHERE \(whereRaw)"
         }
-        return .init(sql: sql + ";", bindings: bindings)
+        return .init(sql: sql + ";", bindings: allBindings)
     }
 
     public static func upsert<Model: SurrealModel & Decodable & Sendable>(
@@ -227,11 +310,12 @@ public enum SurrealDSL {
         contentBinding: String = "content",
         bindings: [String: SurrealValue] = [:]
     ) -> SurrealQuery<Model> {
-        var sql = "UPSERT \(model.surrealTable) CONTENT $\(contentBinding)"
-        if let predicate {
-            sql += " WHERE \(predicate.raw)"
+        var sql = "UPSERT \(SurrealQL.escapeIdent(model.surrealTable)) CONTENT $\(contentBinding)"
+        let (whereRaw, allBindings) = resolve(bindings, predicate)
+        if let whereRaw {
+            sql += " WHERE \(whereRaw)"
         }
-        return .init(sql: sql + ";", bindings: bindings)
+        return .init(sql: sql + ";", bindings: allBindings)
     }
 
     public static func delete<Model: SurrealModel & Decodable & Sendable>(
@@ -239,11 +323,12 @@ public enum SurrealDSL {
         where predicate: SurrealPredicate? = nil,
         bindings: [String: SurrealValue] = [:]
     ) -> SurrealQuery<Model> {
-        var sql = "DELETE \(model.surrealTable)"
-        if let predicate {
-            sql += " WHERE \(predicate.raw)"
+        var sql = "DELETE \(SurrealQL.escapeIdent(model.surrealTable))"
+        let (whereRaw, allBindings) = resolve(bindings, predicate)
+        if let whereRaw {
+            sql += " WHERE \(whereRaw)"
         }
-        return .init(sql: sql + ";", bindings: bindings)
+        return .init(sql: sql + ";", bindings: allBindings)
     }
 
     public static func live<Model: SurrealModel & Decodable & Sendable>(
@@ -252,13 +337,40 @@ public enum SurrealDSL {
         fetch: [String] = [],
         bindings: [String: SurrealValue] = [:]
     ) -> LiveQuery<Model> {
-        var sql = "LIVE SELECT * FROM \(model.surrealTable)"
-        if let predicate {
-            sql += " WHERE \(predicate.raw)"
+        var sql = "LIVE SELECT * FROM \(SurrealQL.escapeIdent(model.surrealTable))"
+        let (whereRaw, allBindings) = resolve(bindings, predicate)
+        if let whereRaw {
+            sql += " WHERE \(whereRaw)"
         }
         if !fetch.isEmpty {
-            sql += " FETCH " + fetch.joined(separator: ", ")
+            sql += " FETCH " + fetch.map(SurrealQL.escapeFieldPath).joined(separator: ", ")
         }
-        return .init(sql: sql + ";", bindings: bindings)
+        return .init(sql: sql + ";", bindings: allBindings)
+    }
+
+    /// A live query whose notifications carry the change to each record as
+    /// patch operations (`LIVE SELECT DIFF`), rather than the whole record.
+    /// A created record arrives as a single `replace` of the root path.
+    public static func liveDiff<Model: SurrealModel>(
+        _ model: Model.Type,
+        where predicate: SurrealPredicate? = nil,
+        bindings: [String: SurrealValue] = [:]
+    ) -> LiveQuery<[SurrealPatchOperation]> {
+        var sql = "LIVE SELECT DIFF FROM \(SurrealQL.escapeIdent(model.surrealTable))"
+        let (whereRaw, allBindings) = resolve(bindings, predicate)
+        if let whereRaw {
+            sql += " WHERE \(whereRaw)"
+        }
+        return .init(sql: sql + ";", bindings: allBindings)
+    }
+
+    /// The predicate's text and the bindings for the whole statement. A
+    /// predicate binding that clashes with an explicit one is renamed.
+    private static func resolve(
+        _ bindings: [String: SurrealValue],
+        _ predicate: SurrealPredicate?
+    ) -> (String?, [String: SurrealValue]) {
+        guard let predicate else { return (nil, bindings) }
+        return predicate.merged(into: bindings)
     }
 }

@@ -7,7 +7,7 @@ A Swift SDK for [SurrealDB](https://surrealdb.com) with full async/await support
 ## Requirements
 
 - Swift 6.1+
-- SurrealDB v3+
+- SurrealDB 3.x (CI tests 3.3.4 and the nightly build)
 
 ## Platforms
 
@@ -33,7 +33,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/surrealdb/surrealdb.swift.git", from: "0.1.0"),
+    .package(url: "https://github.com/surrealdb/surrealdb.swift.git", from: "1.0.0-alpha.2"),
 ],
 targets: [
     .target(
@@ -142,10 +142,28 @@ let client = try SurrealClient(
     websocketOptions: SurrealWebSocketOptions(
         reconnectEnabled: true,
         maxReconnectAttempts: 8,
-        reconnectBaseDelay: 0.5
+        reconnectBaseDelay: 0.5,
+        reconnectMaxDelay: 30
     )
 )
 ```
+
+You can watch the connection's state, for example to show it in your UI:
+
+```swift
+for await status in client.connectionStatusUpdates() {
+    switch status {
+    case .connecting: print("Connecting…")
+    case .connected: print("Connected")
+    case .reconnecting(let attempt): print("Reconnecting (attempt \(attempt))…")
+    case .disconnected: print("Disconnected")
+    }
+}
+```
+
+The stream starts with the current status. `client.connectionStatus` reads it without waiting. After a reconnect, `.connected` comes once the sessions and live queries are restored.
+
+`connect()` waits for the server to answer before returning, and throws if it can't be reached within `requestTimeout`. After a drop, the client retries up to `maxReconnectAttempts` times, doubling the delay from `reconnectBaseDelay` up to `reconnectMaxDelay`, then gives up; calling `connect()` again starts over.
 
 ### Wire Protocol
 
@@ -163,6 +181,24 @@ let json = try SurrealClient(
 ```
 
 The wire protocol controls both the HTTP `Content-Type` and the WebSocket sub-protocol negotiated during the handshake.
+
+#### `cbor.2` and sized numbers
+
+SurrealDB 4.0 adds sized numbers (`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `u64`, `f16` and `f32`) and a CBOR dialect, `cbor.2`, that carries them. Plain `cbor` widens them: the integers arrive as `int` (a `u64` above `Int64.max` as a decimal) and the floats as `float`.
+
+The client asks for `cbor.2` and falls back to `cbor`:
+
+- Over WebSocket it offers the sub-protocols `cbor.2` and `cbor`, and uses the one the server picks.
+- Over HTTP it sends plain `cbor` with `Accept: application/cbor; v=2`. Once a response comes back as `v=2`, it sends `v=2` too.
+
+Servers before 4.0 pick plain `cbor`, so nothing changes for them. On `cbor.2`, sized numbers decode to `SurrealValue.sized(SurrealSizedNumber)`, and `.sized` values you send keep their width. Over `cbor` and JSON the client widens them, as the server does. To always use plain `cbor`:
+
+```swift
+let client = try SurrealClient(
+    endpoint: "ws://localhost:8000",
+    options: SurrealClientOptions(negotiatesCBOR2: false)
+)
+```
 
 ### Selecting a Namespace and Database
 
@@ -250,6 +286,24 @@ let client = try SurrealClient(
 )
 ```
 
+With a token pair from a record access method that has `WITH REFRESH`, `authenticate` refreshes the pair if the access token has expired, and returns the pair to keep:
+
+```swift
+tokens = try await client.authenticate(tokens)
+
+// Or explicitly
+tokens = try await client.refresh(tokens)
+
+// Make the refresh token unusable, for example on sign-out
+try await client.revoke(tokens)
+```
+
+`info()` returns the signed-in record user, and `info(as:)` decodes it:
+
+```swift
+let me = try await client.info(as: User.self)
+```
+
 `SessionContext` here is a static, local snapshot passed at `init` to resume a login — it has no identity on the server. Don't confuse it with `SurrealSession` (below), a live, forkable, server-tracked session identified by a `SessionID`.
 
 ### Invalidating a session
@@ -257,6 +311,17 @@ let client = try SurrealClient(
 ```swift
 try await client.invalidate()
 ```
+
+### Server information
+
+```swift
+let version = try await client.version()  // "3.3.4"
+try await client.health()                 // throws if the server isn't healthy
+```
+
+`health()` calls the server's HTTP `/health` endpoint, whichever transport the client uses.
+
+`connect()` checks the server version and throws `SurrealError.unsupportedServerVersion` for anything outside `ServerVersion.minimum` (3.0.0) up to, but not including, `ServerVersion.maximum` (5.0.0). Set `checkServerVersion: false` in `SurrealClientOptions` to skip the check.
 
 ---
 
@@ -291,7 +356,9 @@ try await session.unset("minAge")
 
 `set`/`unset` are also available on `SurrealClient` itself, scoped to the default session.
 
-Variables are merged into each query's bindings client-side — they are not server-side `LET` parameters. Contexts the server evaluates on its own (for example live-query permission clauses referencing `$minAge`) won't see them. This differs from the JavaScript SDK, whose `set`/`unset` issue server-side RPCs.
+Over WebSocket, `set` and `unset` define and remove the parameter on the server (the `let` and `unset` RPC methods), so anything the server evaluates for that session sees it, and they're defined again after a reconnect. HTTP keeps no session state on the server, so there the variables are sent with each query instead.
+
+`reset()` clears the session: namespace, database, authentication and variables.
 
 ### Closing a session
 
@@ -317,7 +384,7 @@ Session state is tracked per client instance: `session(id:)` only works for ids 
 
 ### Reconnection behaviour
 
-When the WebSocket reconnects after a drop, the client automatically re-attaches every session and replays its namespace/database selection and authentication. Bound variables live client-side, so they survive reconnects without any replay. Live queries are **not** re-registered — their streams finish when the connection drops and must be re-opened by the caller.
+When the WebSocket reconnects after a drop, the client automatically re-attaches every session and replays its namespace/database selection, authentication and variables. Live queries started with `live(_:)` are re-issued on the new connection and their streams carry on, so don't re-open them; streams from `liveOf(_:as:)` finish, since the SDK doesn't know their query. Notifications sent while the connection was down are lost.
 
 `SurrealSession` conforms to the same `SurrealQueryable`/`SurrealLiveQueryable` protocols as `SurrealClient`, so every query, CRUD, and live-query method shown elsewhere in this README works identically on a session.
 
@@ -371,6 +438,9 @@ let updated = try await client.update(
     where: Person.Fields.name == "Ada"
 )
 
+// The predicate is required. To replace every record in the table, say so:
+let all = try await client.updateAll(Person.self, content: Person(id: nil, name: "Ada", age: 31))
+
 // Update a specific record
 let id = SurrealRecordID(table: "person", id: .string("ada"))
 let record: Person? = try await client.update(
@@ -399,6 +469,58 @@ let deleted = try await client.delete(Person.self, where: Person.Fields.age < 18
 let id = SurrealRecordID(table: "person", id: .string("ada"))
 let record: Person? = try await client.delete(recordID: id, as: Person.self)
 ```
+
+### Insert
+
+```swift
+// Several records in one statement
+let people = try await client.insert([ada, grace])
+
+// Edges into a relation table; each needs `in` and `out`
+let edges = try await client.insertRelation([Knows(from: adaID, to: graceID, since: 1843)])
+```
+
+### Merge and Patch
+
+`merge` changes only the fields you pass. Use a dictionary or a type holding just those fields. A `nil` optional property is left out of the encoded value, so that field keeps its value; to clear a field, pass `SurrealValue.null` for it (`["nickname": SurrealValue.null]`).
+
+```swift
+let id = SurrealRecordID(table: "person", id: .string("ada"))
+let updated = try await client.merge(recordID: id, with: ["age": SurrealValue.int(37)], as: Person.self)
+
+// Every matching record
+try await client.merge(Person.self, with: ["active": true], where: Person.Fields.age >= 18)
+```
+
+`patch` applies [JSON Patch](https://datatracker.ietf.org/doc/html/rfc6902) operations. If any operation fails, including a `test`, the record is left as it was.
+
+```swift
+try await client.patch(recordID: id, [
+    .test(path: "/name", value: .string("Ada")),
+    .replace(path: "/age", value: .int(37)),
+], as: Person.self)
+```
+
+### Relate
+
+```swift
+let edge = try await client.relate(adaID, "knows", graceID, content: .object(["since": .int(1843)]), as: Knows.self)
+
+// From each record in one list to each in the other
+try await client.relate([adaID], "knows", [graceID, alanID], as: Knows.self)
+```
+
+### Record ranges
+
+A `SurrealRecordRange` selects the records of a table whose ids fall in a range. Swift ranges of `Int64` convert directly; for other key types, build the bounds yourself.
+
+```swift
+let firstTen = try await client.select(range: SurrealRecordRange(table: "log", range: SurrealRange(1...10)), as: LogEntry.self)
+try await client.merge(range: SurrealRecordRange(table: "log", range: SurrealRange(11...)), with: ["archived": true], as: LogEntry.self)
+try await client.delete(range: SurrealRecordRange(table: "log", range: SurrealRange(..<1)), as: LogEntry.self)
+```
+
+All of these are also available on sessions and interactive transactions.
 
 ---
 
@@ -496,11 +618,32 @@ for await event in stream {
 }
 ```
 
-Cancel the stream by killing the live query:
+To stop listening, cancel the task iterating the stream, or let go of every reference to the stream: either ends it, and the SDK then kills the live query on the server. `break` on its own isn't enough while something still holds the stream. You can also kill it yourself with `client.kill(liveQueryID: event.queryID)`.
+
+If the WebSocket drops and reconnects, the client re-issues every live query it started with `live(_:)` and keeps the same stream going. Notifications sent while the connection was down are lost, and the server gives the re-issued query a new id, so `event.queryID` changes. If the reconnect fails for good, the streams finish.
+
+#### Diffs
+
+`SurrealDSL.liveDiff` streams the change to each record as patch operations instead of the whole record:
 
 ```swift
-// Capture the queryID from the first event, then:
-try await client.kill(liveQueryID: event.queryID)
+let changes = try await client.live(SurrealDSL.liveDiff(Person.self))
+for await event in changes {
+    for operation in event.decoded ?? [] {
+        print(operation)  // .replace(path: "/age", value: .int(37)), ...
+    }
+}
+```
+
+String fields change by `.change(path:value:)`, which carries a diff-match-patch text diff.
+
+#### Attaching to a running live query
+
+`liveOf` streams the notifications for a live query started some other way, such as a raw `LIVE SELECT`. Notifications that arrived before you attached are delivered first (up to 256 per query). The SDK doesn't know that query, so it can't re-issue it after a reconnect; the stream finishes instead.
+
+```swift
+guard case .uuid(let id)? = try await client.queryRaw("LIVE SELECT * FROM person WHERE age > 18;").first?.result else { return }
+let stream = try await client.liveOf(id, as: Person.self)
 ```
 
 ---
@@ -565,6 +708,77 @@ try await client.transaction { tx in
 }
 ```
 
+### Interactive transactions
+
+Over WebSocket you can also hold a transaction open on the server and send statements into it one call at a time, reading results before deciding what to do next. Nothing it writes is visible outside it until it commits.
+
+```swift
+let tx = try await client.beginTransaction()
+let from = try await tx.select(recordID: SurrealRecordID(table: "account", id: .string("ada")), as: Account.self)
+if let from, from.balance >= 10 {
+    _ = try await tx.queryRaw("UPDATE account:ada SET balance -= 10; UPDATE account:bob SET balance += 10;")
+    try await tx.commit()
+} else {
+    try await tx.cancel()
+}
+```
+
+`withTransaction` commits when the closure returns and cancels when it throws:
+
+```swift
+try await client.withTransaction { tx in
+    _ = try await tx.create(Account(name: "ada", balance: 10))
+    _ = try await tx.create(Account(name: "bob", balance: 0))
+}
+```
+
+Sessions have their own: `session.beginTransaction()`. The server doesn't allow interactive transactions over HTTP, so there `beginTransaction()` throws `SurrealError.unsupportedFeature`. A transaction lives on the connection: if it drops, the transaction is gone and further calls on it throw.
+
+---
+
+## Functions and APIs
+
+`run` calls a server-side function by name:
+
+```swift
+let length = try await client.run("string::len", arguments: [.string("abcd")])  // .int(4)
+let greeting = try await client.run("fn::greet", arguments: [.string("Ada")], as: String.self)
+```
+
+`api` calls an endpoint defined with `DEFINE API`, through `api::invoke`, so it works over either transport:
+
+```swift
+let response = try await client.api(
+    "/users/ada",
+    method: .post,
+    body: .object(["name": .string("Ada")]),
+    headers: ["x-request-source": "app"],
+    query: ["verbose": "true"]
+)
+response.status                         // 201
+let user = try response.body(as: User.self)
+```
+
+A path or method with no endpoint returns status 404 rather than throwing.
+
+---
+
+## Import and Export
+
+Both use the server's HTTP routes, whichever transport the client uses, and act on the selected namespace and database with the client's credentials.
+
+```swift
+// Everything, as SurrealQL
+let dump = try await client.export()
+
+// Or a selection
+let users = try await client.export(SurrealExportOptions(tables: .only(["user"]), functions: false))
+
+try await other.import(dump)
+```
+
+An import must start with `OPTION IMPORT;`, as exports do. It isn't transactional: if some statements fail, the rest still apply, and `import` throws `SurrealError.importFailed` with the failures.
+
 ---
 
 ## SurrealValue
@@ -583,6 +797,8 @@ let v: SurrealValue = .object(["name": .string("Ada"), "age": .int(30)])
 let v: SurrealValue = .uuid(UUID())
 let v: SurrealValue = .datetime(Date())
 let v: SurrealValue = .recordID(SurrealRecordID(table: "person", id: .string("ada")))
+let v: SurrealValue = .file(SurrealFileRef(bucket: "docs", key: "/report.pdf"))  // f"docs:/report.pdf"
+let v: SurrealValue = .sized(.u8(5))  // 5u8, SurrealDB 4.0 (see cbor.2 above)
 
 // Convert any Encodable to SurrealValue
 let value = try SurrealValue.fromEncodable(myStruct)
@@ -590,6 +806,8 @@ let value = try SurrealValue.fromEncodable(myStruct)
 // Decode a SurrealValue back to a Swift type
 let person = try value.decode(Person.self)
 ```
+
+`SurrealFileRef` fields in your models encode and decode as file values. Files are an experimental server feature: start the server with `--allow-experimental files` (or `SURREAL_CAPS_ALLOW_EXPERIMENTAL=files`) and define a bucket with `DEFINE BUCKET`.
 
 ---
 
@@ -601,8 +819,10 @@ Applies to both HTTP and WebSocket clients:
 
 ```swift
 SurrealClientOptions(
-    requestTimeout: 20,   // seconds, default 20
-    pingInterval: 30      // seconds, default 30
+    requestTimeout: 20,        // seconds, default 20
+    pingInterval: 30,          // seconds, default 30
+    checkServerVersion: true,  // default true
+    negotiatesCBOR2: true      // default true: ask for cbor.2, fall back to cbor
 )
 ```
 
@@ -612,7 +832,8 @@ SurrealClientOptions(
 SurrealWebSocketOptions(
     reconnectEnabled: true,       // default true
     maxReconnectAttempts: 8,      // default 8
-    reconnectBaseDelay: 0.5       // seconds, default 0.5
+    reconnectBaseDelay: 0.5,      // seconds, default 0.5
+    reconnectMaxDelay: 30         // seconds, default 30
 )
 ```
 
@@ -927,6 +1148,19 @@ Integration environment variables:
 | `SURREALDB_USER` | _(unset)_ | If unset, sign-in is skipped. |
 | `SURREALDB_PASSWORD` | _(unset)_ | If unset, sign-in is skipped. |
 | `SURREALDB_AUTH_LEVEL` | `root` | One of `root`, `namespace` / `ns`, `database` / `db`. |
+
+`./scripts/test-integration.sh` starts a server and runs every `integration_` test against it. Set `SURREALDB_BIN` to test a particular `surreal` binary (this runs it locally even when Docker is available), or `SURREALDB_IMAGE_TAG` to choose the Docker image. CI runs the suite against SurrealDB 3.3.4 and the nightly build. Tests that need `cbor.2` skip when the server doesn't negotiate it.
+
+### Conformance
+
+The CBOR codec is checked against the shared test vectors and scenarios in [surrealdb-protocol](https://github.com/surrealdb/surrealdb-protocol), pinned to release v0.14.0. Nothing from that repository is copied here: a script checks out the tag into `.build/surrealdb-protocol`.
+
+```sh
+./scripts/fetch-surrealdb-protocol.sh   # then `swift test` runs the CBOR vectors too
+./scripts/test-conformance.sh           # the scenarios; needs bun and a surreal binary (SURREAL_BIN)
+```
+
+`test-conformance.sh` builds `Conformance/Driver`, which answers the runner's JSON-lines protocol through this SDK's public API, and fails on any failure not listed in `Conformance/known-failures.txt`. CI runs both against SurrealDB 3.3.4 and the nightly build.
 
 ---
 

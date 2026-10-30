@@ -5,58 +5,159 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private let urlSession: URLSession
     private let clientOptions: SurrealClientOptions
     private let wsOptions: SurrealWebSocketOptions
-    private let codec: any WireCodec
+    /// What the client offers. Each socket speaks `codec`, this narrowed to
+    /// the sub-protocol the server picked for it.
+    private let offeredCodec: any WireCodec
+    private var codec: any WireCodec
+    private let status: ConnectionStatusBroadcaster?
 
     private var task: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
 
     private var pending: [String: CheckedContinuation<RPCResponseEnvelope, Error>] = [:]
+    private var timers: [String: Task<Void, Never>] = [:]
     private var liveContinuations: [UUID: AsyncStream<LiveWireEvent>.Continuation] = [:]
+    /// Notifications for live queries with no stream yet: the server can
+    /// send one before the `LIVE SELECT` reply has been handled, or for a
+    /// query started with raw SurrealQL that `liveOf` attaches to later.
+    /// Bounded: the oldest query ids and events are dropped first.
+    private var liveBuffer: [UUID: [LiveWireEvent]] = [:]
+    private var liveBufferOrder: [UUID] = []
+    static let liveBufferMaxQueries = 64
+    static let liveBufferMaxEvents = 256
     private var reconnectContinuation: AsyncStream<Void>.Continuation?
 
     private var connected = false
     private var closedByClient = false
-    private var reconnectAttempt = 0
+
+    /// Bumped for every socket. The receive and ping loops both report a dead
+    /// socket; only the first report for the current socket is acted on, so
+    /// one drop starts one reconnect loop, not two.
+    private var generation = 0
+
+    /// Bumped for every connection attempt. An attempt that finishes its
+    /// handshake after a newer one started (an overlapping `connect()`, or
+    /// one that cancelled a reconnect mid-handshake) discards its socket
+    /// instead of replacing the newer one's.
+    private var attempt = 0
+
+    /// The `connect()` in flight, which overlapping calls wait for.
+    private var pendingConnect: Task<Void, Error>?
+    /// The connect() calls waiting on `pendingConnect`.
+    private var connectCallers: Set<UUID> = []
+    /// The socket an attempt is handshaking on, before it becomes `task`.
+    /// close() cancels it, so the attempt fails at once.
+    private var connectingSocket: URLSessionWebSocketTask?
 
     init(
         endpoint: URL,
         clientOptions: SurrealClientOptions,
         wsOptions: SurrealWebSocketOptions,
         codec: any WireCodec,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = .shared,
+        status: ConnectionStatusBroadcaster? = nil
     ) {
+        self.status = status
         self.endpoint = Endpoint.asWebSocket(endpoint)
         self.clientOptions = clientOptions
         self.wsOptions = wsOptions
+        self.offeredCodec = codec
         self.codec = codec
         self.urlSession = urlSession
     }
 
     func connect() async throws {
+        if let pendingConnect {
+            return try await join(pendingConnect)
+        }
         closedByClient = false
-        reconnectAttempt = 0
-        try await establishSocket()
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        let connecting = Task {
+            do {
+                try await self.establishSocket()
+            } catch {
+                await self.connectAttemptFailed()
+                throw error
+            }
+        }
+        pendingConnect = connecting
+        defer {
+            // close() may have dropped this attempt and a newer connect()
+            // started its own.
+            if pendingConnect == connecting {
+                pendingConnect = nil
+            }
+        }
+        try await join(connecting)
+    }
+
+    /// Waits for a connection attempt on behalf of one connect() caller.
+    /// The attempt is shared, so it's abandoned only once every caller
+    /// waiting on it has been cancelled.
+    private func join(_ attempt: Task<Void, Error>) async throws {
+        let caller = UUID()
+        connectCallers.insert(caller)
+        defer { connectCallers.remove(caller) }
+        try await withTaskCancellationHandler {
+            try await attempt.value
+        } onCancel: {
+            Task { await self.connectCallerCancelled(caller, attempt) }
+        }
+        try Task.checkCancellation()
+    }
+
+    /// This attempt replaced any automatic reconnect, so if it fails nothing
+    /// will feed the live streams kept open across an earlier drop.
+    private func connectAttemptFailed() {
+        guard !connected, !closedByClient, reconnectTask == nil else { return }
+        finishAllLiveStreams()
+    }
+
+    private func connectCallerCancelled(_ caller: UUID, _ attempt: Task<Void, Error>) {
+        connectCallers.remove(caller)
+        guard connectCallers.isEmpty, pendingConnect == attempt else { return }
+        attempt.cancel()
+        pendingConnect = nil
+        connectingSocket?.cancel(with: .goingAway, reason: nil)
+        connectingSocket = nil
+    }
+
+    func cborDialect() -> CBORDialect? {
+        (codec as? CBORWireCodec)?.dialect
     }
 
     func close() async {
         closedByClient = true
         connected = false
+        generation += 1
 
-        receiveTask?.cancel()
-        receiveTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        pendingConnect?.cancel()
+        pendingConnect = nil
+        connectingSocket?.cancel(with: .normalClosure, reason: nil)
+        connectingSocket = nil
 
-        pingTask?.cancel()
-        pingTask = nil
-
-        task?.cancel(with: .normalClosure, reason: nil)
-        task = nil
+        tearDownSocket(closeCode: .normalClosure)
 
         failPending(with: SurrealError.notConnected)
         finishAllLiveStreams()
 
         reconnectContinuation?.finish()
         reconnectContinuation = nil
+    }
+
+    func connectionIdentity() async -> Int? {
+        connected ? generation : nil
+    }
+
+    func ifConnectionIs(_ identity: Int, _ action: @Sendable () -> Void) async {
+        // A drop reports .reconnecting from inside this actor, so it lands
+        // either before this check or after the action, never in between.
+        if connected && generation == identity { action() }
     }
 
     func reconnectEvents() -> AsyncStream<Void> {
@@ -66,55 +167,239 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         }
     }
 
+    /// Sends a request and waits for its reply. Throws `SurrealError.timeout`
+    /// after `requestTimeout`, and `CancellationError` as soon as the calling
+    /// task is cancelled; either way the request is forgotten, so a late reply
+    /// is dropped.
     func send(_ request: RPCRequest, session: SessionContext) async throws -> RPCResponseEnvelope {
         _ = session
         guard connected else {
             throw SurrealError.notConnected
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[request.id] = continuation
-            Task {
-                do {
-                    let payload = try codec.encode(request)
-                    try await self.rawSend(payload, requestID: request.id)
-                } catch {
-                    self.failPending(requestID: request.id, with: error)
+        // The server echoes UUID-shaped ids lowercased over JSON, so match
+        // replies case-insensitively.
+        let id = request.id.lowercased()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                // Runs on the actor before onCancel's task can, so a request
+                // cancelled from here on is always found in `pending`.
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending[id] = continuation
+                startTimer(for: id, method: request.method)
+                Task {
+                    do {
+                        let payload = try codec.encode(request)
+                        try await self.rawSend(payload, requestID: id)
+                    } catch {
+                        self.failPending(requestID: id, with: error)
+                    }
                 }
             }
+        } onCancel: {
+            Task { await self.requestEnded(id, method: request.method, with: CancellationError()) }
         }
+    }
+
+    /// Methods that change the connection's server-side state. If one times
+    /// out or is cancelled, the server may still apply it after the client
+    /// has given up and kept its old idea of that state.
+    static let stateChangingMethods: Set<String> = [
+        "use", "signin", "signup", "authenticate", "invalidate", "let", "unset",
+        "reset", "attach", "detach", "begin", "refresh",
+    ]
+
+    private func startTimer(for id: String, method: String) {
+        let timeout = clientOptions.requestTimeout
+        guard timeout > 0, timeout.isFinite else { return }
+        timers[id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.requestEnded(id, method: method, with: SurrealError.timeout)
+        }
+    }
+
+    /// Gives up on a request that timed out or was cancelled before its reply.
+    private func requestEnded(_ id: String, method: String, with error: Error) {
+        guard pending[id] != nil else { return }
+        failPending(requestID: id, with: error)
+        // The server may still apply it. Start over on a new socket, whose
+        // state the client replays from what it knows, rather than guess.
+        if Self.stateChangingMethods.contains(method), connected {
+            handleSocketTermination(generation: generation, error: error)
+        }
+    }
+
+    /// Removes a pending request and its timer.
+    private func takePending(_ id: String) -> CheckedContinuation<RPCResponseEnvelope, Error>? {
+        timers.removeValue(forKey: id)?.cancel()
+        return pending.removeValue(forKey: id)
     }
 
     func openLiveStream(for queryID: UUID) async -> AsyncStream<LiveWireEvent> {
-        AsyncStream { continuation in
-            liveContinuations[queryID] = continuation
-            continuation.onTermination = { [queryID] _ in
-                Task {
-                    await self.closeLiveStream(for: queryID)
-                }
+        let (stream, continuation) = AsyncStream<LiveWireEvent>.makeStream()
+        liveContinuations[queryID] = continuation
+        continuation.onTermination = { [queryID] _ in
+            Task {
+                await self.closeLiveStream(for: queryID)
             }
         }
+        deliverBuffered(to: queryID)
+        return stream
     }
 
     func closeLiveStream(for queryID: UUID) async {
+        dropBuffered(queryID)
         guard let continuation = liveContinuations.removeValue(forKey: queryID) else {
             return
         }
         continuation.finish()
     }
 
+    /// Points the stream for `oldID` at `newID`, after the core has
+    /// re-issued its live query on a new connection.
+    func moveLiveStream(from oldID: UUID, to newID: UUID) async {
+        guard let continuation = liveContinuations.removeValue(forKey: oldID) else {
+            return
+        }
+        liveContinuations[newID] = continuation
+        deliverBuffered(to: newID)
+    }
+
+    private func deliver(_ event: LiveWireEvent) {
+        guard let continuation = liveContinuations[event.queryID] else {
+            buffer(event)
+            return
+        }
+        continuation.yield(event)
+        if event.action == .killed {
+            // KILLED is the last notification for this id.
+            liveContinuations.removeValue(forKey: event.queryID)?.finish()
+        }
+    }
+
+    private func buffer(_ event: LiveWireEvent) {
+        let id = event.queryID
+        if liveBuffer[id] == nil {
+            liveBufferOrder.append(id)
+            if liveBufferOrder.count > Self.liveBufferMaxQueries {
+                liveBuffer.removeValue(forKey: liveBufferOrder.removeFirst())
+            }
+        }
+        var events = liveBuffer[id, default: []]
+        events.append(event)
+        if events.count > Self.liveBufferMaxEvents {
+            events.removeFirst(events.count - Self.liveBufferMaxEvents)
+        }
+        liveBuffer[id] = events
+    }
+
+    private func deliverBuffered(to queryID: UUID) {
+        guard let events = dropBuffered(queryID) else { return }
+        for event in events {
+            deliver(event)
+        }
+    }
+
+    @discardableResult
+    private func dropBuffered(_ queryID: UUID) -> [LiveWireEvent]? {
+        guard let events = liveBuffer.removeValue(forKey: queryID) else { return nil }
+        liveBufferOrder.removeAll { $0 == queryID }
+        return events
+    }
+
+    // MARK: - Socket lifecycle
+
+    /// Opens a socket and waits for the server to answer an RPC `ping`, so a
+    /// dead or unreachable host fails here instead of "connecting" and then
+    /// failing every request. (A WebSocket-level ping sent before the
+    /// handshake finishes can go unanswered forever, so it isn't used here.)
     private func establishSocket() async throws {
-        task?.cancel(with: .goingAway, reason: nil)
+        attempt += 1
+        let thisAttempt = attempt
+        tearDownSocket(closeCode: .goingAway)
 
-        let socket = urlSession.webSocketTask(with: endpoint, protocols: codec.websocketSubprotocols)
-        task = socket
+        let socket = urlSession.webSocketTask(with: endpoint, protocols: offeredCodec.websocketSubprotocols)
         socket.resume()
+        connectingSocket = socket
+        defer {
+            if connectingSocket === socket {
+                connectingSocket = nil
+            }
+        }
 
+        let negotiated: any WireCodec
+        do {
+            negotiated = try await withTimeout(seconds: clientOptions.requestTimeout) { [offeredCodec] in
+                try await Self.handshake(socket, offering: offeredCodec)
+            }
+        } catch {
+            socket.cancel(with: .goingAway, reason: nil)
+            if let error = error as? SurrealError {
+                throw error
+            }
+            throw SurrealError.connectionLost(cause: error)
+        }
+
+        // close() may have run while we waited, or a newer attempt started.
+        guard !closedByClient, thisAttempt == attempt else {
+            socket.cancel(with: .normalClosure, reason: nil)
+            throw SurrealError.notConnected
+        }
+
+        generation += 1
+        task = socket
+        codec = negotiated
         connected = true
-        reconnectAttempt = 0
 
-        startReceiveLoop()
-        startPingLoop()
+        startReceiveLoop(generation: generation)
+        startPingLoop(generation: generation)
+    }
+
+    /// Returns the codec for the sub-protocol the server picked.
+    private static func handshake(_ socket: URLSessionWebSocketTask, offering offered: any WireCodec) async throws -> any WireCodec {
+        let id = UUID().uuidString.lowercased()
+        let request = RPCRequest(id: id, method: "ping", params: nil, session: nil, txn: nil)
+        // A ping has no values, so it's the same bytes in every dialect.
+        try await socket.send(.data(try offered.encode(request)))
+        // The send waited for the upgrade, so its response is in.
+        let subprotocol = (socket.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        let codec = offered.negotiated(subprotocol: subprotocol)
+
+        // Nothing else is in flight on a new socket, so the next message is
+        // the reply.
+        let message = try await socket.receive()
+        let data: Data
+        switch message {
+        case .data(let bytes):
+            data = bytes
+        case .string(let text):
+            data = Data(text.utf8)
+        @unknown default:
+            throw SurrealError.invalidResponse("Unexpected WebSocket message during connect.")
+        }
+        let envelope = try codec.decodeEnvelope(data)
+        if let error = envelope.error {
+            throw SurrealError.serverError(error)
+        }
+        guard envelope.id?.lowercased() == id else {
+            throw SurrealError.invalidResponse("Unexpected reply to the connect ping.")
+        }
+        return codec
+    }
+
+    private func tearDownSocket(closeCode: URLSessionWebSocketTask.CloseCode) {
+        receiveTask?.cancel()
+        receiveTask = nil
+
+        pingTask?.cancel()
+        pingTask = nil
+
+        task?.cancel(with: closeCode, reason: nil)
+        task = nil
     }
 
     private func rawSend(_ data: Data, requestID: String) async throws {
@@ -130,69 +415,54 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
         }
     }
 
-    private func startReceiveLoop() {
-        receiveTask?.cancel()
+    private func startReceiveLoop(generation: Int) {
+        guard let socket = task else { return }
         receiveTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            while await self.connected {
+            while !Task.isCancelled {
                 do {
-                    guard let task = await self.task else {
-                        throw SurrealError.notConnected
-                    }
-
-                    let message = try await task.receive()
+                    let message = try await socket.receive()
+                    guard let self else { return }
                     switch message {
                     case .data(let data):
                         try await self.handleIncoming(data)
                     case .string(let text):
-                        let data = Data(text.utf8)
-                        try await self.handleIncoming(data)
+                        try await self.handleIncoming(Data(text.utf8))
                     @unknown default:
                         continue
                     }
                 } catch {
-                    await self.handleSocketTermination(error: error)
-                    break
+                    await self?.handleSocketTermination(generation: generation, error: error)
+                    return
                 }
             }
         }
     }
 
-    private func startPingLoop() {
-        pingTask?.cancel()
-        let pingInterval = clientOptions.pingInterval
+    private func startPingLoop(generation: Int) {
+        guard let socket = task else { return }
+        let pingInterval = max(clientOptions.pingInterval, 1)
+        let pongTimeout = clientOptions.requestTimeout
         pingTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            while await self.connected {
-                let nanos = UInt64(max(pingInterval, 1) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: nanos)
-                guard await self.connected else {
-                    break
-                }
-
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(pingInterval * 1_000_000_000))
+                guard !Task.isCancelled else { return }
                 do {
-                    try await self.sendPing()
+                    // A peer that stops answering is as dead as one that
+                    // closed the socket.
+                    try await withTimeout(seconds: pongTimeout) {
+                        try await Self.ping(socket)
+                    }
                 } catch {
-                    await self.handleSocketTermination(error: error)
-                    break
+                    await self?.handleSocketTermination(generation: generation, error: error)
+                    return
                 }
             }
         }
     }
 
-    private func sendPing() async throws {
-        guard let task else {
-            throw SurrealError.notConnected
-        }
-
+    private static func ping(_ socket: URLSessionWebSocketTask) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            task.sendPing { error in
+            socket.sendPing { error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
@@ -203,9 +473,23 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     }
 
     private func handleIncoming(_ data: Data) async throws {
-        let response = try codec.decodeEnvelope(data)
+        let response: RPCResponseEnvelope
+        do {
+            response = try codec.decodeEnvelope(data)
+        } catch {
+            // A reply that won't decode (say, a malformed tag in its result)
+            // fails its own request; the connection is fine.
+            if let id = codec.requestID(in: data)?.lowercased() {
+                takePending(id)?.resume(throwing: error as? SurrealError ?? SurrealError.invalidResponse("Couldn't decode the reply: \(error)"))
+                return
+            }
+            // A message that can't be matched to anything might have been any
+            // reply or notification: treat the connection as broken rather
+            // than leave its request waiting.
+            throw error
+        }
 
-        if let id = response.id, let continuation = pending.removeValue(forKey: id) {
+        if let id = response.id?.lowercased(), let continuation = takePending(id) {
             continuation.resume(returning: response)
             return
         }
@@ -214,54 +498,73 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
             return
         }
 
-        liveContinuations[liveEvent.queryID]?.yield(liveEvent)
+        deliver(liveEvent)
     }
 
-    private func handleSocketTermination(error: Error) async {
+    // MARK: - Reconnect
+
+    private func handleSocketTermination(generation: Int, error: Error) {
+        // A stale report: this socket was already replaced or closed.
+        guard generation == self.generation, connected else { return }
+
         connected = false
-
-        receiveTask?.cancel()
-        receiveTask = nil
-
-        pingTask?.cancel()
-        pingTask = nil
-
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
+        tearDownSocket(closeCode: .goingAway)
 
         failPending(with: SurrealError.connectionLost(cause: error))
-        finishAllLiveStreams()
+        // Notifications for the old connection's live queries can't be
+        // claimed any more: their ids die with it.
+        liveBuffer.removeAll()
+        liveBufferOrder.removeAll()
 
-        guard !closedByClient else {
+        guard !closedByClient, wsOptions.reconnectEnabled, wsOptions.maxReconnectAttempts != 0 else {
+            finishAllLiveStreams()
+            status?.send(.disconnected)
             return
         }
+        status?.send(.reconnecting(attempt: 1))
 
-        guard wsOptions.reconnectEnabled else {
-            return
+        reconnectTask?.cancel()
+        reconnectTask = Task { [weak self] in
+            await self?.reconnectLoop()
         }
+    }
 
-        while reconnectAttempt < wsOptions.maxReconnectAttempts {
-            reconnectAttempt += 1
-            let delaySeconds = wsOptions.reconnectBaseDelay * pow(2.0, Double(reconnectAttempt - 1))
-            let sleepNanos = UInt64(max(delaySeconds, 0.1) * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: sleepNanos)
+    private func reconnectLoop() async {
+        // A negative `maxReconnectAttempts` (-1, as in the JS SDK) never gives up.
+        let limit = wsOptions.maxReconnectAttempts < 0 ? Int.max : wsOptions.maxReconnectAttempts
+        for attempt in 1...limit {
+            let delay = Self.backoffDelay(attempt: attempt, options: wsOptions)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
 
-            guard !closedByClient else {
-                return
-            }
+            guard !Task.isCancelled, !closedByClient else { return }
+            status?.send(.reconnecting(attempt: attempt))
 
             do {
                 try await establishSocket()
+                // Live streams stay open across the reconnect; the core
+                // re-issues their queries and moves them to the new ids.
                 reconnectContinuation?.yield(())
                 return
             } catch {
                 continue
             }
         }
+        // Out of attempts: nothing will feed the live streams again.
+        finishAllLiveStreams()
+        status?.send(.disconnected)
     }
 
+    /// `base * 2^(attempt - 1)`, capped at `reconnectMaxDelay`.
+    static func backoffDelay(attempt: Int, options: SurrealWebSocketOptions) -> TimeInterval {
+        let exponent = min(max(attempt - 1, 0), 30)
+        let delay = options.reconnectBaseDelay * pow(2.0, Double(exponent))
+        return min(max(delay, 0), max(options.reconnectMaxDelay, 0))
+    }
+
+    // MARK: - Pending requests and live streams
+
     private func failPending(requestID: String, with error: Error) {
-        guard let continuation = pending.removeValue(forKey: requestID) else {
+        guard let continuation = takePending(requestID) else {
             return
         }
         continuation.resume(throwing: error)
@@ -270,6 +573,10 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func failPending(with error: Error) {
         let continuations = pending.values
         pending.removeAll(keepingCapacity: false)
+        for timer in timers.values {
+            timer.cancel()
+        }
+        timers.removeAll(keepingCapacity: false)
         for continuation in continuations {
             continuation.resume(throwing: error)
         }
@@ -278,6 +585,8 @@ actor WebSocketRPCEngine: LiveRPCEngine, SessionCapableRPCEngine {
     private func finishAllLiveStreams() {
         let continuations = liveContinuations.values
         liveContinuations.removeAll(keepingCapacity: false)
+        liveBuffer.removeAll()
+        liveBufferOrder.removeAll()
         for continuation in continuations {
             continuation.finish()
         }

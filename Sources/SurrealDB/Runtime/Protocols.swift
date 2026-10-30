@@ -7,10 +7,17 @@ public protocol SurrealQueryable: Sendable {
     func signup(_ credentials: SignUpCredentials) async throws -> AuthTokens
     func authenticate(_ token: String) async throws
     func invalidate() async throws
+    @discardableResult
+    func authenticate(_ tokens: AuthTokens) async throws -> AuthTokens
+    func refresh(_ tokens: AuthTokens) async throws -> AuthTokens
+    func revoke(_ tokens: AuthTokens) async throws
+    func info() async throws -> SurrealValue
+    func reset() async throws
 
-    /// Binds a variable that is merged into every subsequent query's bindings.
+    /// Defines `$name` for this session (the server's `let`), so queries can
+    /// refer to it. Kept across reconnects.
     func set(_ name: String, value: SurrealValue) async throws
-    /// Removes a previously bound variable.
+    /// Removes a variable defined with `set`.
     func unset(_ name: String) async throws
 
     func query<T: Decodable & Sendable>(_ query: SurrealQuery<T>) async throws -> [T]
@@ -39,16 +46,34 @@ public protocol SurrealQueryable: Sendable {
         content: Model
     ) async throws -> Model?
 
+    /// Replaces the content of every record matching `predicate`. To
+    /// replace every record in the table, call `updateAll` instead.
     func update<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
-        where predicate: SurrealPredicate?
+        where predicate: SurrealPredicate
     ) async throws -> [Model]
 
+    /// Replaces the content of every record in the table.
+    func updateAll<Model: SurrealModel & Codable & Sendable>(
+        _ model: Model.Type,
+        content: Model
+    ) async throws -> [Model]
+
+    /// Replaces the content of every record matching `predicate`, or creates
+    /// a record if none match. To replace every record in the table, call
+    /// `upsertAll` instead.
     func upsert<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
-        where predicate: SurrealPredicate?
+        where predicate: SurrealPredicate
+    ) async throws -> [Model]
+
+    /// Replaces the content of every record in the table, or creates a
+    /// record if the table is empty.
+    func upsertAll<Model: SurrealModel & Codable & Sendable>(
+        _ model: Model.Type,
+        content: Model
     ) async throws -> [Model]
 
     func delete<Model: SurrealModel & Decodable & Sendable>(
@@ -74,5 +99,15 @@ public protocol SurrealQueryable: Sendable {
 
 public protocol SurrealLiveQueryable: SurrealQueryable {
     func live<T: Decodable & Sendable>(_ query: LiveQuery<T>) async throws -> AsyncStream<LiveEvent<T>>
+    /// Attaches to a live query already running on this connection. See
+    /// `SurrealClient.liveOf(_:as:)`.
+    func liveOf<T: Decodable & Sendable>(_ queryID: UUID, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>>
     func kill(liveQueryID: UUID) async throws
+}
+
+extension SurrealLiveQueryable {
+    /// For conformers written before `liveOf` existed.
+    public func liveOf<T: Decodable & Sendable>(_ queryID: UUID, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>> {
+        throw SurrealError.unsupportedFeature("\(Self.self) doesn't support liveOf.")
+    }
 }

@@ -3,29 +3,56 @@ import Foundation
 public struct SurrealClientOptions: Sendable {
     public var requestTimeout: TimeInterval
     public var pingInterval: TimeInterval
+    /// Whether `connect()` checks the server's version against
+    /// ``ServerVersion/minimum`` and ``ServerVersion/maximum`` and refuses
+    /// unsupported servers.
+    public var checkServerVersion: Bool
+    /// Whether to ask the server for `cbor.2`, the CBOR dialect SurrealDB 4.0
+    /// adds for its sized numbers. A server that doesn't speak it (anything
+    /// before 4.0) answers in plain `cbor`, so this is safe to leave on.
+    ///
+    /// On `cbor.2`, a `u8` or `f32` column comes back as
+    /// ``SurrealValue/sized(_:)``. Turn this off to keep plain `cbor`, where
+    /// the server widens them to `.int`, `.double` or (a `u64` above
+    /// `Int64.max`) `.decimal`. Typed decoding (`Decodable`) reads either.
+    /// Only applies to ``SurrealWireProtocol/cbor``.
+    public var negotiatesCBOR2: Bool
 
     public init(
         requestTimeout: TimeInterval = 20,
-        pingInterval: TimeInterval = 30
+        pingInterval: TimeInterval = 30,
+        checkServerVersion: Bool = true,
+        negotiatesCBOR2: Bool = true
     ) {
         self.requestTimeout = requestTimeout
         self.pingInterval = pingInterval
+        self.checkServerVersion = checkServerVersion
+        self.negotiatesCBOR2 = negotiatesCBOR2
     }
 }
 
 public struct SurrealWebSocketOptions: Sendable {
+    /// Whether to reconnect after the connection drops unexpectedly.
     public var reconnectEnabled: Bool
+    /// How many reconnect attempts to make after a drop before giving up.
+    /// The count starts again after each successful reconnect. A negative
+    /// value (`-1`) retries without limit; `0` never reconnects.
     public var maxReconnectAttempts: Int
+    /// The delay before the first attempt; each later attempt doubles it.
     public var reconnectBaseDelay: TimeInterval
+    /// The longest delay between two attempts.
+    public var reconnectMaxDelay: TimeInterval
 
     public init(
         reconnectEnabled: Bool = true,
         maxReconnectAttempts: Int = 8,
-        reconnectBaseDelay: TimeInterval = 0.5
+        reconnectBaseDelay: TimeInterval = 0.5,
+        reconnectMaxDelay: TimeInterval = 30
     ) {
         self.reconnectEnabled = reconnectEnabled
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
+        self.reconnectMaxDelay = reconnectMaxDelay
     }
 }
 
@@ -67,6 +94,31 @@ public struct AuthTokens: Sendable, Hashable {
     public init(access: String, refresh: String? = nil) {
         self.access = access
         self.refresh = refresh
+    }
+
+    /// When the access token expires, read from its JWT `exp` claim. `nil`
+    /// if the token isn't a JWT or has no expiry. The signature isn't
+    /// checked: this is only used to refresh early.
+    public var accessExpiry: Date? {
+        let parts = access.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var base64 = parts[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exp = claims["exp"] as? NSNumber
+        else { return nil }
+        return Date(timeIntervalSince1970: exp.doubleValue)
+    }
+
+    /// The `{ access, refresh }` object the server's `refresh` and `revoke`
+    /// methods take.
+    var surrealValue: SurrealValue {
+        var object: [String: SurrealValue] = ["access": .string(access)]
+        if let refresh {
+            object["refresh"] = .string(refresh)
+        }
+        return .object(object)
     }
 }
 
@@ -180,8 +232,14 @@ public enum LiveAction: String, Sendable, Codable {
 
 public struct LiveEvent<T: Decodable & Sendable>: Sendable {
     public let queryID: UUID
+    /// What happened. `.killed` is the last event of a stream: the server
+    /// ended the live query (`KILL`, removing its table, or losing access),
+    /// and the stream finishes after delivering it.
     public let action: LiveAction
+    /// The record id as text (`person:alice`), or `""` for `.killed`.
     public let recordID: String
+    /// The record id, when the notification carries one.
+    public let record: SurrealRecordID?
     public let rawPayload: SurrealValue
     public let decoded: T?
 
@@ -189,12 +247,14 @@ public struct LiveEvent<T: Decodable & Sendable>: Sendable {
         queryID: UUID,
         action: LiveAction,
         recordID: String,
+        record: SurrealRecordID? = nil,
         rawPayload: SurrealValue,
         decoded: T?
     ) {
         self.queryID = queryID
         self.action = action
         self.recordID = recordID
+        self.record = record
         self.rawPayload = rawPayload
         self.decoded = decoded
     }

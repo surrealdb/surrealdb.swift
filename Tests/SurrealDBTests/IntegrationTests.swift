@@ -30,7 +30,7 @@ private struct IntegrationLivePerson: SurrealModel, Codable, Sendable {
     }
 }
 
-private enum IntegrationEnv {
+enum IntegrationEnv {
     static func value(_ key: String) -> String? {
         let raw = ProcessInfo.processInfo.environment[key]
         guard let raw, !raw.isEmpty else { return nil }
@@ -82,16 +82,23 @@ private enum IntegrationEnv {
         return "\(scheme)://\(host)"
     }
 
+    /// Whether the proxy-based tests can run. `TCPProxy` forwards plain TCP
+    /// and the tests reach it over `ws://`, so a TLS host (`https://`,
+    /// `wss://`) can't sit behind it.
+    static var canProxy: Bool {
+        enabled && !["https://", "wss://"].contains { host.lowercased().hasPrefix($0) }
+    }
+
     static var hasCredentials: Bool {
         user != nil && password != nil
     }
 }
 
-private func wsEndpoint() -> String { IntegrationEnv.endpoint(scheme: "ws") }
-private func httpEndpoint() -> String { IntegrationEnv.endpoint(scheme: "http") }
-private func shouldSkipSignin() -> Bool { !IntegrationEnv.hasCredentials }
+func wsEndpoint() -> String { IntegrationEnv.endpoint(scheme: "ws") }
+func httpEndpoint() -> String { IntegrationEnv.endpoint(scheme: "http") }
+func shouldSkipSignin() -> Bool { !IntegrationEnv.hasCredentials }
 
-private func authenticateIfNeeded(_ client: some SurrealQueryable) async throws {
+func authenticateIfNeeded(_ client: some SurrealQueryable) async throws {
     guard let user = IntegrationEnv.user, let password = IntegrationEnv.password else {
         return
     }
@@ -116,7 +123,7 @@ private func authenticateIfNeeded(_ client: some SurrealQueryable) async throws 
     _ = try await client.signin(credentials)
 }
 
-private func awaitTaskValue<T: Sendable>(
+func awaitTaskValue<T: Sendable>(
     _ task: Task<T, Error>,
     timeoutSeconds: Double,
     timeoutMessage: String
@@ -140,7 +147,7 @@ private func awaitTaskValue<T: Sendable>(
     }
 }
 
-private func assertAllOK(_ rows: [RPCQueryResult]) {
+func assertAllOK(_ rows: [RPCQueryResult]) {
     #expect(!rows.isEmpty)
     for row in rows {
         #expect(row.status == .ok)
@@ -273,7 +280,7 @@ func integration_wsLiveQueries() async throws {
     try await authenticateIfNeeded(client)
     try await client.use(namespace: IntegrationEnv.namespace, database: IntegrationEnv.database)
 
-    let defineTable = try await client.queryRaw("DEFINE TABLE \(IntegrationLivePerson.surrealTable) SCHEMALESS;", bindings: [:])
+    let defineTable = try await client.queryRaw("DEFINE TABLE IF NOT EXISTS \(IntegrationLivePerson.surrealTable) SCHEMALESS;", bindings: [:])
     assertAllOK(defineTable)
 
     let recordKey = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")

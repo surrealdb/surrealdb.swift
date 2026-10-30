@@ -5,7 +5,13 @@ export SURREALDB_RUN_INTEGRATION=1
 
 SURREAL_PID=""
 START_MODE=""
-INTEGRATION_MODE="${SURREALDB_INTEGRATION_MODE:-auto}"
+# A binary given in SURREALDB_BIN means "test this one": run it locally
+# rather than letting auto mode pick Docker.
+if [[ -n "${SURREALDB_BIN:-}" ]]; then
+  INTEGRATION_MODE="${SURREALDB_INTEGRATION_MODE:-local}"
+else
+  INTEGRATION_MODE="${SURREALDB_INTEGRATION_MODE:-auto}"
+fi
 SURREALDB_BIND_HOST="${SURREALDB_BIND_HOST:-127.0.0.1}"
 SURREALDB_PORT="${SURREALDB_PORT:-8000}"
 
@@ -51,8 +57,16 @@ start_docker() {
 
 start_local_surreal() {
   local surreal_bin
-  surreal_bin="$(command -v surreal || true)"
+  # SURREALDB_BIN pins the server binary (CI installs one per matrix entry).
+  surreal_bin="${SURREALDB_BIN:-$(command -v surreal || true)}"
   local install_dir="${PWD}/.build/surrealdb-bin"
+
+  # A pinned binary that can't run is an error, not a reason to test a
+  # different version.
+  if [[ -n "${SURREALDB_BIN:-}" && ! -x "$SURREALDB_BIN" ]]; then
+    echo "SURREALDB_BIN is set but not executable: ${SURREALDB_BIN}"
+    return 1
+  fi
 
   if [[ -z "$surreal_bin" ]]; then
     surreal_bin="${install_dir}/surreal"
@@ -71,7 +85,8 @@ start_local_surreal() {
   fi
 
   mkdir -p .build
-  "${surreal_bin}" start --log info --user "${SURREALDB_USER}" --pass "${SURREALDB_PASSWORD}" memory --bind "${SURREALDB_BIND_HOST}:${SURREALDB_PORT}" > .build/surrealdb.log 2>&1 &
+  # Files (`DEFINE BUCKET`, `f"..."`) are experimental; the file tests need them.
+  SURREAL_CAPS_ALLOW_EXPERIMENTAL=files "${surreal_bin}" start --log info --user "${SURREALDB_USER}" --pass "${SURREALDB_PASSWORD}" memory --bind "${SURREALDB_BIND_HOST}:${SURREALDB_PORT}" > .build/surrealdb.log 2>&1 &
   SURREAL_PID="$!"
   START_MODE="local"
 }
@@ -93,8 +108,14 @@ fi
 
 wait_for_surreal
 
-swift test --filter integration_wsAuthQueryCrud
-swift test --filter integration_httpParity
-swift test --filter integration_wsFullCRUDQueries
-swift test --filter integration_wsFunctionAndGeoQueries
-swift test --filter integration_wsLiveQueries
+echo "Testing against $(curl -fsS "http://${SURREALDB_BIND_HOST}:${SURREALDB_PORT}/version")"
+
+# Create the namespace and database up front: tests run in parallel, and
+# racing to create them can hit a transaction conflict on a fresh server.
+curl -fsS -u "${SURREALDB_USER}:${SURREALDB_PASSWORD}" -H "Accept: application/json" \
+  --data-binary "DEFINE NAMESPACE IF NOT EXISTS ${SURREALDB_NAMESPACE}; USE NS ${SURREALDB_NAMESPACE}; DEFINE DATABASE IF NOT EXISTS ${SURREALDB_NAME};" \
+  "http://${SURREALDB_BIND_HOST}:${SURREALDB_PORT}/sql" >/dev/null
+
+# Every test whose name starts with integration_ (they skip themselves
+# unless SURREALDB_RUN_INTEGRATION=1).
+swift test --filter integration_

@@ -31,6 +31,13 @@ public enum SurrealError: Error, Sendable {
     case queryErrors([QueryErrorDetail])
     case timeout
     case invalidSession(SessionID)
+    /// The server's version is outside the range this SDK supports. Turn off
+    /// `SurrealClientOptions.checkServerVersion` to connect anyway.
+    case unsupportedServerVersion(version: String, supported: String)
+    /// Some statements in an import failed. The import isn't transactional:
+    /// every statement not listed here was applied. `index` counts the
+    /// failures, not the statements in the dump.
+    case importFailed([QueryErrorDetail])
 
     public var message: String {
         switch self {
@@ -65,6 +72,11 @@ public enum SurrealError: Error, Sendable {
             return "The request timed out."
         case .invalidSession(let id):
             return "No such session: \(id)."
+        case .unsupportedServerVersion(let version, let supported):
+            return "SurrealDB \(version) is not supported; this SDK supports \(supported)."
+        case .importFailed(let errors):
+            let first = errors.first.map { ": \($0.message)" } ?? ""
+            return "\(errors.count) statement(s) in the import failed\(first)"
         }
     }
 
@@ -91,6 +103,16 @@ public enum SurrealError: Error, Sendable {
             return nil
         }
         return payload.typedKind
+    }
+
+    /// True if the server rejected the request because the auth token has
+    /// expired, over either transport.
+    public var isTokenExpired: Bool {
+        if serverErrorKind?.isTokenExpired == true { return true }
+        if case .httpError(401, let body) = self {
+            return body.localizedCaseInsensitiveContains("token has expired")
+        }
+        return false
     }
 }
 
@@ -130,6 +152,8 @@ extension SurrealError: LocalizedError {
             return "Retry the operation or increase requestTimeout in SurrealClientOptions."
         case .invalidSession:
             return "The session was closed or never existed; create a new one via newSession()/forkSession()."
+        case .unsupportedServerVersion:
+            return "Use a supported server version, or set checkServerVersion to false in SurrealClientOptions."
         default:
             return nil
         }

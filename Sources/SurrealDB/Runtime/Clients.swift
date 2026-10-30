@@ -29,7 +29,8 @@ public actor SurrealClient: SurrealLiveQueryable {
         session: SessionContext = .init()
     ) throws {
         let rpcURL = try Endpoint.normalizedRPCURL(from: endpoint)
-        let codec = makeWireCodec(wireProtocol)
+        let codec = makeWireCodec(wireProtocol, offersCBOR2: options.negotiatesCBOR2)
+        let status = ConnectionStatusBroadcaster()
 
         let transport: any RPCEngine
         switch rpcURL.scheme?.lowercased() {
@@ -39,7 +40,8 @@ public actor SurrealClient: SurrealLiveQueryable {
                 endpoint: rpcURL,
                 clientOptions: options,
                 wsOptions: websocketOptions,
-                codec: codec
+                codec: codec,
+                status: status
             )
         case "http", "https":
             self.engine = .http
@@ -54,7 +56,32 @@ public actor SurrealClient: SurrealLiveQueryable {
             throw SurrealError.invalidEndpoint(endpoint)
         }
 
-        self.core = SurrealClientCore(engine: transport, sessionContext: session)
+        self.core = SurrealClientCore(
+            engine: transport,
+            sessionContext: session,
+            http: HTTPEndpoints(rpcURL: rpcURL, timeout: options.requestTimeout),
+            checkServerVersion: options.checkServerVersion,
+            status: status
+        )
+        self.status = status
+    }
+
+    private nonisolated let status: ConnectionStatusBroadcaster
+
+    /// Where the connection stands right now.
+    public nonisolated var connectionStatus: SurrealConnectionStatus {
+        status.current
+    }
+
+    /// A stream that starts with the current status and then yields each
+    /// change: `.connecting` and `.connected` on `connect()`,
+    /// `.reconnecting(attempt:)` while a WebSocket retries after a drop,
+    /// `.connected` once it's back and sessions and live queries are
+    /// restored, and `.disconnected` after `close()` or when retrying gives
+    /// up. If you fall far behind, older updates are dropped in favour of the
+    /// latest.
+    public nonisolated func connectionStatusUpdates() -> AsyncStream<SurrealConnectionStatus> {
+        status.updates()
     }
 
     public func connect() async throws {
@@ -110,6 +137,61 @@ public actor SurrealClient: SurrealLiveQueryable {
         try await core.invalidate(session: nil)
     }
 
+    /// Authenticates with a token pair, refreshing it first if the access
+    /// token has expired. Returns the pair now in use.
+    @discardableResult
+    public func authenticate(_ tokens: AuthTokens) async throws -> AuthTokens {
+        try await core.authenticate(tokens, session: nil)
+    }
+
+    /// Exchanges the refresh token for a new pair and authenticates with it.
+    /// The old refresh token is revoked by the server.
+    public func refresh(_ tokens: AuthTokens) async throws -> AuthTokens {
+        try await core.refresh(tokens, session: nil)
+    }
+
+    /// Revokes a refresh token so it can't be used again.
+    public func revoke(_ tokens: AuthTokens) async throws {
+        try await core.revoke(tokens, session: nil)
+    }
+
+    /// The signed-in user's record (`$auth`), or `.none` when not signed in
+    /// as a record user.
+    public func info() async throws -> SurrealValue {
+        try await core.info(session: nil)
+    }
+
+    /// The signed-in user's record, decoded; `nil` when there isn't one.
+    public func info<T: Decodable & Sendable>(as type: T.Type) async throws -> T? {
+        let value = try await core.info(session: nil)
+        if value == .none || value == .null {
+            return nil
+        }
+        return try value.decode(T.self)
+    }
+
+    /// Clears this session's namespace, database, authentication and
+    /// variables, on the server and locally.
+    public func reset() async throws {
+        try await core.reset(session: nil)
+    }
+
+    /// The CBOR dialect the connection uses (`cbor.2` once negotiated).
+    func cborDialect() async -> CBORDialect? {
+        await core.cborDialect()
+    }
+
+    /// The server's version, e.g. `"3.3.4"`.
+    public func version() async throws -> String {
+        try await core.version()
+    }
+
+    /// Checks the server's `/health` endpoint, throwing if it isn't healthy.
+    /// Works for WebSocket endpoints too: it goes over HTTP to the same host.
+    public func health() async throws {
+        try await core.health()
+    }
+
     public func set(_ name: String, value: SurrealValue) async throws {
         try await core.set(name, value: value, session: nil)
     }
@@ -130,6 +212,165 @@ public actor SurrealClient: SurrealLiveQueryable {
         _ build: @Sendable (SurrealTransaction) throws -> Void
     ) async throws -> [RPCQueryResult] {
         try await core.transaction(build, session: nil)
+    }
+
+    /// Inserts `values` into `Model`'s table in one statement and returns
+    /// the inserted records.
+    public func insert<Model: SurrealModel & Codable & Sendable>(_ values: [Model]) async throws -> [Model] {
+        try await core.insert(values, relation: false, session: nil)
+    }
+
+    /// Inserts one record into `Model`'s table.
+    public func insert<Model: SurrealModel & Codable & Sendable>(_ value: Model) async throws -> Model? {
+        try await core.insert([value], relation: false, session: nil).first
+    }
+
+    /// Inserts edges into `Edge`'s table, which must be a relation table.
+    /// Each edge needs `in` and `out` record ids.
+    public func insertRelation<Edge: SurrealModel & Codable & Sendable>(_ edges: [Edge]) async throws -> [Edge] {
+        try await core.insert(edges, relation: true, session: nil)
+    }
+
+    /// Merges `data` into a record, leaving fields it doesn't mention alone.
+    /// `data` is usually a dictionary or a type with just the fields to
+    /// change. A `nil` optional property is left out, so that field keeps
+    /// its value; to clear a field, pass `SurrealValue.null` for it.
+    public func merge<Model: Decodable & Sendable>(
+        recordID: SurrealRecordID,
+        with data: some Encodable & Sendable,
+        as model: Model.Type
+    ) async throws -> Model? {
+        try await core.merge(target: .recordID(recordID), where: nil, data: SurrealValue.fromEncodable(data), as: model, session: nil).first
+    }
+
+    /// Merges `data` into every record of `Model`'s table matching
+    /// `predicate`.
+    public func merge<Model: SurrealModel & Decodable & Sendable>(
+        _ model: Model.Type,
+        with data: some Encodable & Sendable,
+        where predicate: SurrealPredicate
+    ) async throws -> [Model] {
+        try await core.merge(target: .table(Model.surrealTable), where: predicate, data: SurrealValue.fromEncodable(data), as: model, session: nil)
+    }
+
+    /// Merges `data` into every record whose id is in `range`.
+    public func merge<Model: Decodable & Sendable>(
+        range: SurrealRecordRange,
+        with data: some Encodable & Sendable,
+        as model: Model.Type
+    ) async throws -> [Model] {
+        try await core.merge(target: range.surrealValue, where: nil, data: SurrealValue.fromEncodable(data), as: model, session: nil)
+    }
+
+    /// Applies JSON Patch operations to a record. If any operation fails,
+    /// including a `test`, the record is left unchanged and this throws.
+    public func patch<Model: Decodable & Sendable>(
+        recordID: SurrealRecordID,
+        _ operations: [SurrealPatchOperation],
+        as model: Model.Type
+    ) async throws -> Model? {
+        try await core.patch(recordID: recordID, operations: operations, as: model, session: nil)
+    }
+
+    /// Creates an `edge` record from `from` to `to` (`RELATE from->edge->to`)
+    /// and returns it.
+    public func relate<Edge: Decodable & Sendable>(
+        _ from: SurrealRecordID,
+        _ edge: String,
+        _ to: SurrealRecordID,
+        content: SurrealValue? = nil,
+        as type: Edge.Type
+    ) async throws -> Edge? {
+        try await core.relate(from: [from], edge: edge, to: [to], content: content, as: type, session: nil).first
+    }
+
+    /// Creates an `edge` record from every record in `from` to every record
+    /// in `to`.
+    public func relate<Edge: Decodable & Sendable>(
+        _ from: [SurrealRecordID],
+        _ edge: String,
+        _ to: [SurrealRecordID],
+        content: SurrealValue? = nil,
+        as type: Edge.Type
+    ) async throws -> [Edge] {
+        try await core.relate(from: from, edge: edge, to: to, content: content, as: type, session: nil)
+    }
+
+    /// Selects the records whose ids are in `range`.
+    public func select<Model: Decodable & Sendable>(
+        range: SurrealRecordRange,
+        as model: Model.Type
+    ) async throws -> [Model] {
+        try await core.select(range: range, as: model, session: nil)
+    }
+
+    /// Deletes the records whose ids are in `range`, returning them as they
+    /// were.
+    public func delete<Model: Decodable & Sendable>(
+        range: SurrealRecordRange,
+        as model: Model.Type
+    ) async throws -> [Model] {
+        try await core.delete(range: range, as: model, session: nil)
+    }
+
+    /// Calls a server-side function by name, such as `fn::greet` or
+    /// `string::len`, with `arguments`. `version` picks a version of a
+    /// `DEFINE MODEL` function.
+    public func run(_ name: String, version: String? = nil, arguments: [SurrealValue] = []) async throws -> SurrealValue {
+        try await core.run(name, version: version, arguments: arguments, session: nil)
+    }
+
+    /// Calls a server-side function and decodes its result as `T`.
+    public func run<T: Decodable>(
+        _ name: String,
+        version: String? = nil,
+        arguments: [SurrealValue] = [],
+        as type: T.Type
+    ) async throws -> T {
+        try await core.run(name, version: version, arguments: arguments, session: nil).decode(type)
+    }
+
+    /// Calls a `DEFINE API` endpoint on the selected database. A path with
+    /// no matching endpoint returns status 404 rather than throwing.
+    public func api(
+        _ path: String,
+        method: SurrealAPIMethod = .get,
+        body: SurrealValue? = nil,
+        headers: [String: String] = [:],
+        query: [String: String] = [:]
+    ) async throws -> SurrealAPIResponse {
+        try await core.api(path, method: method, body: body, headers: headers, query: query, session: nil)
+    }
+
+    /// Runs a SurrealQL dump, such as one from `export()`, against the
+    /// selected database over HTTP (`POST /import`). The dump must start
+    /// with `OPTION IMPORT;`, as exports do. The import isn't transactional:
+    /// if some statements fail, the rest still apply and this throws
+    /// `SurrealError.importFailed` listing the failures.
+    public func `import`(_ sql: String) async throws {
+        try await core.importSQL(sql, session: nil)
+    }
+
+    /// Exports the selected database as SurrealQL over HTTP (`/export`).
+    /// With no options, everything is exported.
+    public func export(_ options: SurrealExportOptions? = nil) async throws -> String {
+        try await core.export(options, session: nil)
+    }
+
+    /// Opens an interactive transaction: statements sent through the returned
+    /// handle run inside it until you call `commit()` or `cancel()`.
+    /// WebSocket only; throws `SurrealError.unsupportedFeature` over HTTP.
+    public func beginTransaction() async throws -> SurrealInteractiveTransaction {
+        let txn = try await core.beginTransaction(session: nil)
+        return SurrealInteractiveTransaction(core: core, session: nil, id: txn)
+    }
+
+    /// Runs `body` in an interactive transaction, committing it if `body`
+    /// returns and cancelling it if `body` throws.
+    public func withTransaction<T: Sendable>(
+        _ body: @Sendable (SurrealInteractiveTransaction) async throws -> T
+    ) async throws -> T {
+        try await core.withTransaction(session: nil, body)
     }
 
     public func select<Model: SurrealModel & Decodable & Sendable>(
@@ -159,20 +400,47 @@ public actor SurrealClient: SurrealLiveQueryable {
         try await core.create(recordID: recordID, content: content, session: nil)
     }
 
+    /// Replaces the content of every record matching `predicate`.
+    ///
+    /// The predicate is required: without one this replaced every record in
+    /// the table. Use ``updateAll(_:content:)`` when that's what you want.
     public func update<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
-        where predicate: SurrealPredicate? = nil
+        where predicate: SurrealPredicate
     ) async throws -> [Model] {
         try await core.update(model, content: content, where: predicate, session: nil)
     }
 
+    /// Replaces the content of every record in the table with `content`.
+    public func updateAll<Model: SurrealModel & Codable & Sendable>(
+        _ model: Model.Type,
+        content: Model
+    ) async throws -> [Model] {
+        try await core.update(model, content: content, where: nil, session: nil)
+    }
+
+    /// Replaces the content of every record matching `predicate`, or creates
+    /// a record if none match.
+    ///
+    /// The predicate is required: without one this inserted a new record on
+    /// every call. Use `create(_:)` for that, or ``upsertAll(_:content:)`` to
+    /// replace every record in the table.
     public func upsert<Model: SurrealModel & Codable & Sendable>(
         _ model: Model.Type,
         content: Model,
-        where predicate: SurrealPredicate? = nil
+        where predicate: SurrealPredicate
     ) async throws -> [Model] {
         try await core.upsert(model, content: content, where: predicate, session: nil)
+    }
+
+    /// Replaces the content of every record in the table with `content`, or
+    /// creates a record if the table is empty.
+    public func upsertAll<Model: SurrealModel & Codable & Sendable>(
+        _ model: Model.Type,
+        content: Model
+    ) async throws -> [Model] {
+        try await core.upsert(model, content: content, where: nil, session: nil)
     }
 
     public func delete<Model: SurrealModel & Decodable & Sendable>(
@@ -207,6 +475,15 @@ public actor SurrealClient: SurrealLiveQueryable {
     /// the client was created with an HTTP endpoint.
     public func live<T: Decodable & Sendable>(_ query: LiveQuery<T>) async throws -> AsyncStream<LiveEvent<T>> {
         try await core.live(query, session: nil)
+    }
+
+    /// Attaches to a live query already running on this connection, such as
+    /// one started with a raw `LIVE SELECT`, and streams its notifications,
+    /// starting with any that arrived before this call. Unlike `live(_:)`,
+    /// the stream finishes on a reconnect: the SDK doesn't know the query,
+    /// so it can't re-issue it.
+    public func liveOf<T: Decodable & Sendable>(_ queryID: UUID, as type: T.Type) async throws -> AsyncStream<LiveEvent<T>> {
+        try await core.liveOf(queryID, session: nil, as: type)
     }
 
     public func kill(liveQueryID: UUID) async throws {
